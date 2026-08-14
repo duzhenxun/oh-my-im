@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git@github.com:duzhenxun/oh-my-im.git"
+    "url": "git+ssh://git@github.com/duzhenxun/oh-my-im.git"
   },
   "homepage": "https://github.com/duzhenxun/oh-my-im#readme",
   "publishConfig": {
