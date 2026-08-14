@@ -10,6 +10,11 @@ export interface CodexResult {
   durationMs: number;
 }
 
+export interface CodexCallbacks {
+  onText?: (text: string) => void;
+  onToolUse?: (toolName: string, toolStats: Record<string, number>) => void;
+}
+
 const log = createLogger("Codex");
 
 function parseJsonLine(line: string): Record<string, unknown> | null {
@@ -50,16 +55,25 @@ function buildArgs(prompt: string, workDir: string, sessionId: string | undefine
   const common = ["--json", "--skip-git-repo-check"];
   if (config.codexPermissionMode === "bypass") {
     common.push("--dangerously-bypass-approvals-and-sandbox");
+  } else if (config.codexPermissionMode === "read-only") {
+    common.push("--sandbox", "read-only");
   } else {
     common.push("--full-auto");
   }
 
+  const modelOptions = config.codexModel ? ["--model", config.codexModel] : [];
+
   return sessionId
-    ? ["exec", "resume", ...common, sessionId, "-"]
-    : ["exec", ...common, "--cd", workDir, "-"];
+    ? ["exec", "resume", ...common, ...modelOptions, sessionId, "-"]
+    : ["exec", ...common, ...modelOptions, "--cd", workDir, "-"];
 }
 
-export function runCodex(prompt: string, sessionId: string | undefined, config: Config): Promise<CodexResult> {
+export function runCodex(
+  prompt: string,
+  sessionId: string | undefined,
+  config: Config,
+  callbacks: CodexCallbacks = {},
+): Promise<CodexResult> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const args = buildArgs(prompt, config.codexWorkDir, sessionId, config);
@@ -98,8 +112,20 @@ export function runCodex(prompt: string, sessionId: string | undefined, config: 
     child.stdin.end();
 
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+      const text = chunk.toString();
+      stderr += text;
+      for (const line of text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+        log.debug(`stderr: ${line.slice(0, 1_000)}`);
+      }
     });
+
+    const fail = (message: string) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      child.kill("SIGTERM");
+      reject(new Error(message));
+    };
 
     const rl = createInterface({ input: child.stdout });
     rl.on("line", (line) => {
@@ -122,9 +148,7 @@ export function runCodex(prompt: string, sessionId: string | undefined, config: 
         const err = payload.error as { message?: string } | undefined;
         const message = err?.message ?? (typeof payload.message === "string" ? payload.message : "Codex failed");
         log.error(message);
-        completed = true;
-        clearTimeout(timeout);
-        reject(new Error(message));
+        fail(message);
         return;
       }
 
@@ -135,11 +159,15 @@ export function runCodex(prompt: string, sessionId: string | undefined, config: 
           const name = typeof item.name === "string" ? item.name : "tool";
           toolStats[name] = (toolStats[name] ?? 0) + 1;
           log.debug(`tool=${name}`);
+          callbacks.onToolUse?.(name, { ...toolStats });
           return;
         }
 
         const text = extractText(item);
-        if (text) accumulated += (accumulated ? "\n\n" : "") + text;
+        if (text) {
+          accumulated += (accumulated ? "\n\n" : "") + text;
+          callbacks.onText?.(accumulated);
+        }
         return;
       }
 

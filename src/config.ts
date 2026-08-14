@@ -1,53 +1,51 @@
-import "dotenv/config";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 export interface Config {
   dingtalkClientId: string;
   dingtalkClientSecret: string;
   codexCliPath: string;
   codexWorkDir: string;
+  codexModel?: string;
   codexProxy?: string;
-  codexPermissionMode?: "bypass";
+  codexPermissionMode?: "bypass" | "read-only";
   allowedUserIds: string[];
   cliTimeoutMs: number;
 }
 
-function requireEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`Missing required env: ${name}`);
-  return value;
+interface LocalBotConfig {
+  clientId?: string;
+  clientSecret?: string;
+  botAllowedUserIds?: string[];
 }
 
-function splitCsv(value: string | undefined): string[] {
-  if (!value) return [];
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+function loadLocalBotConfig(): LocalBotConfig {
+  const path = join(process.cwd(), ".oh-my-im", "dws-dashboard.json");
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as LocalBotConfig;
+  } catch {
+    throw new Error("未找到 .oh-my-im/dws-dashboard.json，请先启动 omi 并在管理页配置钉钉应用凭证");
+  }
 }
 
 function resolveWorkDir(): string {
-  const configured = process.env.CODEX_WORK_DIR?.trim();
-  const dir = configured ? resolve(configured) : process.cwd();
-  if (!existsSync(dir)) throw new Error(`CODEX_WORK_DIR does not exist: ${dir}`);
+  const dir = resolve(process.cwd());
+  if (!existsSync(dir)) throw new Error(`Codex work directory does not exist: ${dir}`);
   return dir;
 }
 
 export function loadConfig(): Config {
-  const permissionMode = process.env.CODEX_PERMISSION_MODE?.trim().toLowerCase();
-  const timeoutRaw = process.env.OPEN_IM_CLI_TIMEOUT_MS?.trim();
-  const timeout = timeoutRaw ? Number.parseInt(timeoutRaw, 10) : 30 * 60 * 1000;
-
+  const local = loadLocalBotConfig();
+  const clientId = local.clientId?.trim();
+  const clientSecret = local.clientSecret?.trim();
+  if (!clientId || !clientSecret) throw new Error("请先在管理页填写钉钉应用 Client ID 和 Client Secret");
   return {
-    dingtalkClientId: requireEnv("DINGTALK_CLIENT_ID"),
-    dingtalkClientSecret: requireEnv("DINGTALK_CLIENT_SECRET"),
-    codexCliPath: process.env.CODEX_CLI_PATH?.trim() || "codex",
+    dingtalkClientId: clientId,
+    dingtalkClientSecret: clientSecret,
+    codexCliPath: "codex",
     codexWorkDir: resolveWorkDir(),
-    codexProxy: process.env.CODEX_PROXY?.trim() || undefined,
-    codexPermissionMode: permissionMode === "bypass" ? "bypass" : undefined,
-    allowedUserIds: splitCsv(process.env.ALLOWED_USER_IDS),
-    cliTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 30 * 60 * 1000,
+    codexPermissionMode: "bypass",
+    allowedUserIds: [...new Set((local.botAllowedUserIds ?? []).map((id) => id.trim()).filter(Boolean))],
+    cliTimeoutMs: 30 * 60 * 1000,
   };
 }
-

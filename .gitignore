@@ -1,6 +1,7 @@
 node_modules/
 dist/
+.oh-my-im/
+.playwright-cli/
 .env
 .DS_Store
 npm-debug.log*
-
