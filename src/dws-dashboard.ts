@@ -36,7 +36,7 @@ function publicConfig(config: DashboardConfig): PublicDashboardConfig {
 function normalizeConfig(value: unknown): DashboardConfig {
   if (!value || typeof value !== "object") throw new Error("配置必须是 JSON 对象");
   const source = value as { targets?: unknown; botAllowedUserIds?: unknown; replyFormat?: unknown; robotName?: unknown; clientId?: unknown; clientSecret?: unknown; robotCode?: unknown };
-  if (!Array.isArray(source.targets) || source.targets.length === 0) throw new Error("至少保留一条钉钉规则");
+  if (!Array.isArray(source.targets)) throw new Error("钉钉规则格式无效");
   const keys = new Set<string>();
   const targets = source.targets.map((item, index) => {
     if (!item || typeof item !== "object") throw new Error(`第 ${index + 1} 条钉钉规则无效`);

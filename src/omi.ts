@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -14,6 +15,7 @@ interface ManagedProcess {
 interface OmiState {
   mode: OmiMode;
   startedAt: string;
+  workspace?: string;
   processes: ManagedProcess[];
 }
 
@@ -25,11 +27,9 @@ interface DashboardServerConfig {
 const args = process.argv.slice(2);
 const command = args.find((argument) => !argument.startsWith("-")) ?? "start";
 const noListen = args.includes("--no-listen");
-const workspace = process.cwd();
-const stateDir = join(workspace, ".oh-my-im");
+const launchWorkspace = process.cwd();
+const stateDir = join(homedir(), ".oh-my-im");
 const stateFile = join(stateDir, "omi-state.json");
-const listenerLockFile = join(workspace, ".oh-my-im-dws-listener.lock");
-const serverConfigFile = join(stateDir, "dws-dashboard-server.json");
 const logFile = join(stateDir, "omi.log");
 const here = dirname(fileURLToPath(import.meta.url));
 const listenerPath = join(here, "dws-listener.js");
@@ -70,7 +70,7 @@ function pidFromFile(path: string): number | undefined {
 }
 
 function unmanagedListenerPid(): number | undefined {
-  const pid = pidFromFile(listenerLockFile);
+  const pid = pidFromFile(join(stateDir, "dws-listener.lock"));
   return pid && isRunning(pid) ? pid : undefined;
 }
 
@@ -96,8 +96,9 @@ function writeState(state: OmiState): void {
   writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
-function dashboardAddress(): string | undefined {
+function dashboardAddress(state: OmiState): string | undefined {
   try {
+    const serverConfigFile = join(stateDir, "dws-dashboard-server.json");
     const config = JSON.parse(readFileSync(serverConfigFile, "utf8")) as DashboardServerConfig;
     if (!config.port || !config.host) return undefined;
     const host = config.host === "0.0.0.0" || config.host === "::" ? "<server-address>" : config.host;
@@ -107,7 +108,7 @@ function dashboardAddress(): string | undefined {
   }
 }
 
-function startProcess(role: ManagedProcess["role"], path: string): ManagedProcess {
+function startProcess(role: ManagedProcess["role"], path: string, workspace: string): ManagedProcess {
   if (!existsSync(path)) throw new Error("omi is not built. Run npm run build first.");
   const logFd = openSync(logFile, "a");
   const child = spawn(process.execPath, [path], {
@@ -120,7 +121,7 @@ function startProcess(role: ManagedProcess["role"], path: string): ManagedProces
   return { role, pid: child.pid };
 }
 
-function start(mode: OmiMode): void {
+function start(mode: OmiMode, workspace = launchWorkspace): void {
   const current = readState();
   if (current) {
     console.log(`omi is already running in ${current.mode} mode`);
@@ -132,9 +133,9 @@ function start(mode: OmiMode): void {
   }
   mkdirSync(stateDir, { recursive: true });
   const processes: ManagedProcess[] = [];
-  if (mode === "listen") processes.push(startProcess("listener", listenerPath));
-  processes.push(startProcess("bot", botPath));
-  writeState({ mode, startedAt: new Date().toISOString(), processes });
+  if (mode === "listen") processes.push(startProcess("listener", listenerPath, workspace));
+  processes.push(startProcess("bot", botPath, workspace));
+  writeState({ mode, startedAt: new Date().toISOString(), workspace, processes });
   console.log(`omi started in ${mode === "listen" ? "group listening + one-to-one" : "one-to-one"} mode`);
   console.log(`log: ${logFile}`);
 }
@@ -169,8 +170,9 @@ function status(): void {
     return;
   }
   console.log(`omi: running (${current.mode === "listen" ? "group listening + one-to-one" : "one-to-one"})`);
+  console.log(`workspace: ${current.workspace || homedir()}`);
   for (const managed of current.processes) console.log(`${managed.role}: running (pid ${managed.pid})`);
-  const address = dashboardAddress();
+  const address = dashboardAddress(current);
   if (address) console.log(`dashboard: ${address}`);
   console.log(`log: ${logFile}`);
 }
@@ -187,7 +189,7 @@ if (args.includes("-h") || args.includes("--help") || command === "help") {
   const current = readState();
   const mode = current?.mode ?? "listen";
   await stop();
-  start(mode);
+  start(mode, current?.workspace || launchWorkspace);
 } else {
   console.error(`Unknown command: ${command}`);
   printHelp();

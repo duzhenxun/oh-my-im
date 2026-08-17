@@ -1,13 +1,13 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { open, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { runApp } from "./index.js";
 import type { Config } from "./config.js";
 
-const workspace = process.cwd();
-const stateDir = join(workspace, ".oh-my-im");
+const stateDir = join(homedir(), ".oh-my-im");
 const dashboardConfigFile = join(stateDir, "dws-dashboard.json");
-const lockFile = join(workspace, ".oh-my-im-bot.lock");
+const lockFile = join(stateDir, "omi-bot.lock");
 const defaultWorkDir = "/Users/dds/go/src/git.inke.cn/opd/activitys/inke.activity.service";
 
 interface DashboardCredentials {

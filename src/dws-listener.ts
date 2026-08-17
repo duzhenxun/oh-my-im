@@ -2,11 +2,13 @@ import { spawn } from "node:child_process";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { runCodex } from "./codex.js";
 import type { Config } from "./config.js";
 import { DingTalkCardClient, type CardReplyHandle } from "./dingtalk-card.js";
+import { applyMonitorCommand, DU_ZHENXUN_OPEN_DINGTALK_ID, parseMonitorCommand, type MonitorCommand } from "./monitor-command.js";
 import {
   startDashboard,
   type DashboardConfig,
@@ -23,7 +25,7 @@ const DEFAULT_DWS_GROUP_IDS = [
   "cid4SeVl1pUe7Z3wiI9IUxtfA==", // 公司自测专用
 ];
 const DEFAULT_ALLOWED_SENDER_IDS = [
-  "DZyRu3o9aXvmiSh7BJa5S4EQiEiE", // 杜振训
+  DU_ZHENXUN_OPEN_DINGTALK_ID, // 杜振训
 ];
 const IGNORED_ROBOT_SENDER_IDS = new Set([
   "DZyRu3o9aXvl2Ve04YPzcrrTokgiSOyA9A", // 映客活动AI in 公司自测专用
@@ -32,11 +34,14 @@ const IGNORED_ROBOT_SENDER_IDS = new Set([
 const DEFAULT_CODEX_WORK_DIR = "/Users/dds/go/src/git.inke.cn/opd/activitys/inke.activity.service";
 const DEFAULT_DWS_CODEX_TIMEOUT_MS = 300_000;
 const DWS_GROUP_MESSAGE_EVENT = "user_im_message_receive_group_all";
-const LISTENER_LOCK_FILE = join(process.cwd(), ".oh-my-im-dws-listener.lock");
-const CARD_STATE_FILE = join(process.cwd(), ".oh-my-im", "dws-cards.json");
-const DASHBOARD_CONFIG_FILE = join(process.cwd(), ".oh-my-im", "dws-dashboard.json");
-const DASHBOARD_SERVER_CONFIG_FILE = join(process.cwd(), ".oh-my-im", "dws-dashboard-server.json");
-const REPLY_HISTORY_FILE = join(process.cwd(), ".oh-my-im", "dws-replies.json");
+const DATA_DIR = join(homedir(), ".oh-my-im");
+const LEGACY_DATA_DIR = join(process.cwd(), ".oh-my-im");
+const CONFIG_MIGRATION_FILE = join(DATA_DIR, ".config-location-v1");
+const LISTENER_LOCK_FILE = join(DATA_DIR, "dws-listener.lock");
+const CARD_STATE_FILE = join(DATA_DIR, "dws-cards.json");
+const DASHBOARD_CONFIG_FILE = join(DATA_DIR, "dws-dashboard.json");
+const DASHBOARD_SERVER_CONFIG_FILE = join(DATA_DIR, "dws-dashboard-server.json");
+const REPLY_HISTORY_FILE = join(DATA_DIR, "dws-replies.json");
 const DEFAULT_DWS_CARD_ROBOT_CODE = "dingn9wrup8mqq1ptabn";
 const DEFAULT_DINGTALK_CLIENT_ID = "";
 const DEFAULT_DINGTALK_CLIENT_SECRET = "";
@@ -45,16 +50,27 @@ const dwsPath = process.env.DWS_CLI_PATH?.trim() || "dws";
 const maxReplyLength = 8_000;
 const cardUpdateIntervalMs = 1_200;
 const historyPollIntervalMs = 3_000;
+const commandPollIntervalMs = 5_000;
 
 interface DwsMessageEvent {
   event_id?: string;
   conversation_id?: string;
+  conversationId?: string;
+  openConversationId?: string;
+  conversation_title?: string;
+  conversation_name?: string;
+  conversationTitle?: string;
+  conversationName?: string;
   content?: string;
+  text?: string;
   sender?: Record<string, unknown>;
   sender_open_dingtalk_id?: string;
+  senderOpenDingTalkId?: string;
   sender_user_id?: string;
   create_time?: string;
   message_id?: string;
+  messageId?: string;
+  openMessageId?: string;
 }
 
 interface DwsMessageListResponse {
@@ -64,12 +80,18 @@ interface DwsMessageListResponse {
     messageId?: string;
     sender?: string;
     senderId?: string;
+    senderOpenDingTalkId?: string;
     text?: string;
+    content?: string;
   }>;
 }
 
 interface DwsChatSearchResponse {
   chats?: Array<{ openConversationId?: string; name?: string; title?: string; memberCount?: number }>;
+}
+
+interface DwsConversationListResponse {
+  conversations?: Array<{ openConversationId?: string; conversationName?: string }>;
 }
 
 interface DwsGroupMembersResponse {
@@ -102,9 +124,14 @@ interface ListenerRuntime {
 }
 
 function eventKey(event: DwsMessageEvent, groupId: string): string | undefined {
-  if (event.message_id?.trim()) return `${groupId}:message:${event.message_id.trim()}`;
+  const messageId = event.message_id || event.messageId || event.openMessageId;
+  if (messageId?.trim()) return `${groupId}:message:${messageId.trim()}`;
   if (event.event_id?.trim()) return `${groupId}:event:${event.event_id.trim()}`;
   return undefined;
+}
+
+function eventGroupId(event: DwsMessageEvent): string | undefined {
+  return event.conversation_id?.trim() || event.conversationId?.trim() || event.openConversationId?.trim();
 }
 
 function formatDwsTime(date: Date): string {
@@ -135,15 +162,34 @@ function listGroupMessages(groupId: string, from: Date): Promise<DwsMessageEvent
           conversation_id: message.conversationId,
           create_time: message.createTime,
           message_id: message.messageId,
-          sender_open_dingtalk_id: message.senderId,
+          sender_open_dingtalk_id: message.senderOpenDingTalkId || message.senderId,
           sender: message.sender ? { name: message.sender } : undefined,
-          content: message.text,
+          content: message.text || message.content,
         })));
       } catch (err) {
         reject(new Error(`Unable to parse dws chat message list output: ${String(err)}`));
       }
     });
   });
+}
+
+async function searchMonitorCommands(from: Date): Promise<DwsMessageEvent[]> {
+  const result = await runDwsJson<DwsMessageListResponse>([
+    "chat", "+search-msg",
+    "--senders", DU_ZHENXUN_OPEN_DINGTALK_ID,
+    "--start", from.toISOString(),
+    "--end", new Date().toISOString(),
+    "--order", "asc",
+    "--limit", "50",
+  ]);
+  return (result.messages ?? []).map((message) => ({
+    conversation_id: message.conversationId,
+    create_time: message.createTime,
+    message_id: message.messageId,
+    sender_open_dingtalk_id: message.senderOpenDingTalkId || message.senderId,
+    sender: message.sender ? { name: message.sender } : undefined,
+    content: message.text || message.content,
+  }));
 }
 
 function runDwsJson<T>(args: string[]): Promise<T> {
@@ -234,7 +280,7 @@ async function loadCardState(): Promise<CardState> {
 }
 
 async function saveCardState(state: CardState): Promise<void> {
-  await mkdir(join(process.cwd(), ".oh-my-im"), { recursive: true });
+  await mkdir(DATA_DIR, { recursive: true });
   const temporary = `${CARD_STATE_FILE}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   await rename(temporary, CARD_STATE_FILE);
@@ -263,44 +309,86 @@ function defaultBotAllowedUserIds(targets: MonitorTarget[]): string[] {
   return [...new Set(targets.map((target) => target.senderId).filter(Boolean))];
 }
 
-async function loadDashboardConfig(): Promise<DashboardConfig> {
+function normalizeDashboardConfig(parsed: DashboardConfig): DashboardConfig {
+  if (!Array.isArray(parsed.targets)) throw new Error("targets is invalid");
+  if (parsed.replyFormat !== "markdown" && parsed.replyFormat !== "plain") throw new Error("replyFormat is invalid");
+  const targets = parsed.targets;
+  return {
+    ...parsed,
+    targets,
+    botAllowedUserIds: Array.isArray(parsed.botAllowedUserIds) && parsed.botAllowedUserIds.length > 0
+      ? [...new Set(parsed.botAllowedUserIds.map((id) => id.trim()).filter(Boolean))]
+      : defaultBotAllowedUserIds(targets),
+    robotName: parsed.robotName?.trim() || DEFAULT_ROBOT_NAME,
+    clientId: parsed.clientId?.trim() || DEFAULT_DINGTALK_CLIENT_ID,
+    clientSecret: parsed.clientSecret?.trim() || DEFAULT_DINGTALK_CLIENT_SECRET,
+    robotCode: parsed.robotCode?.trim() || DEFAULT_DWS_CARD_ROBOT_CODE,
+  };
+}
+
+async function readStoredDashboardConfig(file: string): Promise<DashboardConfig | undefined> {
   try {
-    const parsed = JSON.parse(await readFile(DASHBOARD_CONFIG_FILE, "utf8")) as DashboardConfig;
-    if (!Array.isArray(parsed.targets) || parsed.targets.length === 0) throw new Error("targets is empty");
-    if (parsed.replyFormat !== "markdown" && parsed.replyFormat !== "plain") throw new Error("replyFormat is invalid");
-    const targets = parsed.targets;
-    return {
-      ...parsed,
-      targets,
-      botAllowedUserIds: Array.isArray(parsed.botAllowedUserIds) && parsed.botAllowedUserIds.length > 0
-        ? [...new Set(parsed.botAllowedUserIds.map((id) => id.trim()).filter(Boolean))]
-        : defaultBotAllowedUserIds(targets),
-      robotName: parsed.robotName?.trim() || DEFAULT_ROBOT_NAME,
-      clientId: parsed.clientId?.trim() || DEFAULT_DINGTALK_CLIENT_ID,
-      clientSecret: parsed.clientSecret?.trim() || DEFAULT_DINGTALK_CLIENT_SECRET,
-      robotCode: parsed.robotCode?.trim() || DEFAULT_DWS_CARD_ROBOT_CODE,
-    };
+    return normalizeDashboardConfig(JSON.parse(await readFile(file, "utf8")) as DashboardConfig);
   } catch (err) {
     const code = err && typeof err === "object" && "code" in err ? err.code : undefined;
-    if (code !== "ENOENT") log.warn(`dashboard config ignored: ${String(err)}`);
-    const targets = createDefaultTargets();
-    return {
-      targets,
-      botAllowedUserIds: defaultBotAllowedUserIds(targets),
-      replyFormat: "markdown",
-      robotName: DEFAULT_ROBOT_NAME,
-      clientId: DEFAULT_DINGTALK_CLIENT_ID,
-      clientSecret: DEFAULT_DINGTALK_CLIENT_SECRET,
-      robotCode: DEFAULT_DWS_CARD_ROBOT_CODE,
-    };
+    if (code !== "ENOENT") log.warn(`dashboard config ignored (${file}): ${String(err)}`);
+    return undefined;
   }
 }
 
 async function saveDashboardConfig(config: DashboardConfig): Promise<void> {
-  await mkdir(join(process.cwd(), ".oh-my-im"), { recursive: true });
+  await mkdir(DATA_DIR, { recursive: true });
   const temporary = `${DASHBOARD_CONFIG_FILE}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   await rename(temporary, DASHBOARD_CONFIG_FILE);
+}
+
+function mergeDashboardConfigs(primary: DashboardConfig, legacy: DashboardConfig): DashboardConfig {
+  const targets = [...primary.targets, ...legacy.targets].filter((target, index, all) =>
+    all.findIndex((item) => item.groupId === target.groupId && item.senderId === target.senderId) === index,
+  );
+  return {
+    ...legacy,
+    ...primary,
+    targets,
+    botAllowedUserIds: [...new Set([...primary.botAllowedUserIds, ...legacy.botAllowedUserIds])],
+    clientId: primary.clientId || legacy.clientId,
+    clientSecret: primary.clientSecret || legacy.clientSecret,
+    robotCode: primary.robotCode || legacy.robotCode,
+  };
+}
+
+async function migrateDashboardConfig(): Promise<void> {
+  try {
+    await readFile(CONFIG_MIGRATION_FILE, "utf8");
+    return;
+  } catch {
+    // A single migration avoids resurrecting deleted legacy rules after future restarts.
+  }
+  const primary = await readStoredDashboardConfig(DASHBOARD_CONFIG_FILE);
+  const legacy = LEGACY_DATA_DIR === DATA_DIR
+    ? undefined
+    : await readStoredDashboardConfig(join(LEGACY_DATA_DIR, "dws-dashboard.json"));
+  if (primary && legacy) await saveDashboardConfig(mergeDashboardConfigs(primary, legacy));
+  else if (legacy) await saveDashboardConfig(legacy);
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(CONFIG_MIGRATION_FILE, "migrated\n", "utf8");
+}
+
+async function loadDashboardConfig(): Promise<DashboardConfig> {
+  await migrateDashboardConfig();
+  const stored = await readStoredDashboardConfig(DASHBOARD_CONFIG_FILE);
+  if (stored) return stored;
+  const targets = createDefaultTargets();
+  return {
+    targets,
+    botAllowedUserIds: defaultBotAllowedUserIds(targets),
+    replyFormat: "markdown",
+    robotName: DEFAULT_ROBOT_NAME,
+    clientId: DEFAULT_DINGTALK_CLIENT_ID,
+    clientSecret: DEFAULT_DINGTALK_CLIENT_SECRET,
+    robotCode: DEFAULT_DWS_CARD_ROBOT_CODE,
+  };
 }
 
 function normalizeDashboardServerConfig(value: unknown): DashboardServerConfig {
@@ -314,7 +402,7 @@ function normalizeDashboardServerConfig(value: unknown): DashboardServerConfig {
 }
 
 async function saveDashboardServerConfig(config: DashboardServerConfig): Promise<void> {
-  await mkdir(join(process.cwd(), ".oh-my-im"), { recursive: true });
+  await mkdir(DATA_DIR, { recursive: true });
   const temporary = `${DASHBOARD_SERVER_CONFIG_FILE}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   await rename(temporary, DASHBOARD_SERVER_CONFIG_FILE);
@@ -353,7 +441,7 @@ async function loadReplyHistory(): Promise<ReplyRecord[]> {
 async function recordReply(replies: ReplyRecord[], reply: ReplyRecord): Promise<void> {
   replies.unshift(reply);
   if (replies.length > 100) replies.length = 100;
-  await mkdir(join(process.cwd(), ".oh-my-im"), { recursive: true });
+  await mkdir(DATA_DIR, { recursive: true });
   const temporary = `${REPLY_HISTORY_FILE}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(replies, null, 2)}\n`, "utf8");
   await rename(temporary, REPLY_HISTORY_FILE);
@@ -362,6 +450,60 @@ async function recordReply(replies: ReplyRecord[], reply: ReplyRecord): Promise<
 function groupTitle(groupId: string, config: DashboardConfig): string {
   const target = config.targets.find((item) => item.groupId === groupId);
   return `钉钉群 ${target?.groupName || knownGroupName(groupId)}`;
+}
+
+function eventGroupName(event: DwsMessageEvent, groupId: string, config: DashboardConfig): string {
+  const configuredName = config.targets.find((item) => item.groupId === groupId)?.groupName;
+  const eventName = [event.conversation_title, event.conversation_name, event.conversationTitle, event.conversationName]
+    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  return configuredName || eventName?.trim() || knownGroupName(groupId);
+}
+
+const conversationNameCache = new Map<string, string>();
+
+async function resolveCommandGroupName(groupId: string, config: DashboardConfig): Promise<string> {
+  const configuredName = config.targets.find((item) => item.groupId === groupId)?.groupName?.trim();
+  if (configuredName && configuredName !== groupId && !configuredName.startsWith("cid")) return configuredName;
+  const cached = conversationNameCache.get(groupId);
+  if (cached) return cached;
+  try {
+    const result = await runDwsJson<DwsConversationListResponse>([
+      "chat", "+conversation-list", "--page-all", "--page-limit", "5", "--max-items", "500",
+    ]);
+    for (const conversation of result.conversations ?? []) {
+      const id = conversation.openConversationId?.trim();
+      const name = conversation.conversationName?.trim();
+      if (id && name) conversationNameCache.set(id, name);
+    }
+  } catch (err) {
+    log.warn(`unable to resolve group name for monitor command: ${String(err)}`);
+  }
+  return conversationNameCache.get(groupId) || eventGroupName({}, groupId, config);
+}
+
+async function handleMonitorCommand(
+  command: MonitorCommand,
+  event: DwsMessageEvent,
+  groupId: string,
+  cardClient: DingTalkCardClient,
+  getDashboardConfig: () => DashboardConfig,
+  updateDashboardConfig: (config: DashboardConfig) => Promise<void>,
+): Promise<void> {
+  if (!cardClient.enabled) throw new Error("无法执行 AI 管理命令：请先在管理页配置卡片机器人凭证和 Robot Code");
+  const config = getDashboardConfig();
+  const target = {
+    groupId,
+    groupName: await resolveCommandGroupName(groupId, config),
+    senderId: DU_ZHENXUN_OPEN_DINGTALK_ID,
+    senderName: "杜振训",
+  };
+  const result = applyMonitorCommand(config, command, target);
+  if (result.changed) await updateDashboardConfig(result.config);
+
+  const action = command === "open" ? "已开启" : "已停止";
+  const detail = command === "open" ? "本群已开启AI功能。" : "本群已停止AI相关功能。";
+  await cardClient.create(groupId, randomUUID(), `钉钉群 ${target.groupName} - AI ${action}`, detail);
+  log.info(`monitor command=${command} group=${groupId} changed=${result.changed}`);
 }
 
 function acceptsTarget(event: DwsMessageEvent, config: DashboardConfig): boolean {
@@ -403,6 +545,7 @@ function isMissingCardError(err: unknown): boolean {
 function getSenderId(event: DwsMessageEvent): string {
   const sender = event.sender ?? {};
   return event.sender_open_dingtalk_id?.trim() ||
+    event.senderOpenDingTalkId?.trim() ||
     event.sender_user_id?.trim() ||
     (typeof sender.openDingtalkId === "string" ? sender.openDingtalkId.trim() : "") ||
     (typeof sender.open_dingtalk_id === "string" ? sender.open_dingtalk_id.trim() : "") ||
@@ -659,6 +802,7 @@ function startGroupListener(
   sessions: Map<string, string>,
   cardClient: DingTalkCardClient,
   getDashboardConfig: () => DashboardConfig,
+  updateDashboardConfig: (config: DashboardConfig) => Promise<void>,
   replies: ReplyRecord[],
   liveReplies: Map<string, ReplyRecord>,
   runtime: ListenerRuntime,
@@ -673,6 +817,7 @@ function startGroupListener(
   log.info(`starting ${dwsPath} ${args.join(" ")}`);
   const listener = spawn(dwsPath, args, { stdio: ["pipe", "pipe", "pipe"] });
   runtime.eventConnected = true;
+  let monitorCommandChain = Promise.resolve();
   const rl = createInterface({ input: listener.stdout });
   listener.stderr.on("data", (chunk: Buffer) => {
     const message = chunk.toString().trim();
@@ -680,14 +825,10 @@ function startGroupListener(
   });
 
   const acceptEvent = (event: DwsMessageEvent) => {
-    const groupId = event.conversation_id?.trim();
+    const groupId = eventGroupId(event);
     if (!groupId) return;
     if (isIgnoredRobotEvent(event)) {
       log.debug(`ignored robot message event=${event.event_id || "unknown"}`);
-      return;
-    }
-    if (!acceptsTarget(event, getDashboardConfig())) {
-      log.debug(`ignored unmonitored sender=${getSenderId(event)} event=${event.event_id || "unknown"}`);
       return;
     }
     const key = eventKey(event, groupId);
@@ -697,6 +838,18 @@ function startGroupListener(
       if (seen.size > 1_000) seen.delete(seen.values().next().value as string);
     }
     runtime.lastEventAt = new Date().toISOString();
+    const command = parseMonitorCommand({ senderId: getSenderId(event), content: event.content || event.text });
+    if (command) {
+      if (command === "stop") queues.get(groupId)?.pending.splice(0);
+      monitorCommandChain = monitorCommandChain
+        .then(() => handleMonitorCommand(command, event, groupId, cardClient, getDashboardConfig, updateDashboardConfig))
+        .catch((err) => log.error(`monitor command failed: ${String(err)}`));
+      return;
+    }
+    if (!acceptsTarget(event, getDashboardConfig())) {
+      log.debug(`ignored unmonitored sender=${getSenderId(event)} event=${event.event_id || "unknown"}`);
+      return;
+    }
     void enqueueGroupEvent(event, groupId, queues, cardState, sessions, cardClient, getDashboardConfig, replies, liveReplies, runtime)
       .catch((err) => log.error(String(err)));
   };
@@ -724,11 +877,32 @@ function startGroupListener(
   }, historyPollIntervalMs);
   pollTimer.unref();
 
+  let lastCommandPollAt = new Date(Date.now() - 60_000);
+  let commandPollInFlight = false;
+  const pollCommands = async () => {
+    if (commandPollInFlight) return;
+    commandPollInFlight = true;
+    const queryStartedAt = new Date();
+    try {
+      (await searchMonitorCommands(lastCommandPollAt)).forEach(acceptEvent);
+      // Overlap protects messages created during the request; message ID de-duplication is shared with Stream events.
+      lastCommandPollAt = new Date(queryStartedAt.getTime() - 1_000);
+    } finally {
+      commandPollInFlight = false;
+    }
+  };
+  void pollCommands().catch((err) => log.warn(`monitor command poll failed: ${String(err)}`));
+  const commandPollTimer = setInterval(() => {
+    void pollCommands().catch((err) => log.warn(`monitor command poll failed: ${String(err)}`));
+  }, commandPollIntervalMs);
+  commandPollTimer.unref();
+
   return new Promise<void>((resolve, reject) => {
     listener.on("error", reject);
     listener.on("close", (code) => {
       runtime.eventConnected = false;
       clearInterval(pollTimer);
+      clearInterval(commandPollTimer);
       const close = code === 0
         ? Promise.resolve()
         : Promise.reject(new Error(`dws event consume exited with code ${code}`));
@@ -766,6 +940,13 @@ async function main(): Promise<void> {
   const sessions = new Map<string, string>();
   const cardClient = new DingTalkCardClient();
   let dashboardConfig = await loadDashboardConfig();
+  const applyDashboardConfig = async (config: DashboardConfig): Promise<void> => {
+    await saveDashboardConfig(config);
+    dashboardConfig = config;
+    cardClient.setCredentials(config.clientId, config.clientSecret);
+    cardClient.setRobotCode(config.robotCode);
+    log.info(`dashboard config applied: ${configuredGroupIds(config).length} group(s), ${config.targets.length} rule(s)`);
+  };
   await saveDashboardConfig(dashboardConfig);
   const dashboardServerConfig = await loadDashboardServerConfig();
   cardClient.setCredentials(dashboardConfig.clientId, dashboardConfig.clientSecret);
@@ -779,13 +960,7 @@ async function main(): Promise<void> {
   };
   startDashboard(dashboardServerConfig.port, {
     getConfig: () => dashboardConfig,
-    updateConfig: async (config) => {
-      await saveDashboardConfig(config);
-      dashboardConfig = config;
-      cardClient.setCredentials(config.clientId, config.clientSecret);
-      cardClient.setRobotCode(config.robotCode);
-      log.info(`dashboard config applied: ${configuredGroupIds(config).length} group(s), ${config.targets.length} rule(s)`);
-    },
+    updateConfig: applyDashboardConfig,
     getStatus: (): DashboardStatus => ({ ...runtime }),
     getReplies: () => [...liveReplies.values(), ...replies],
     searchGroups,
@@ -793,7 +968,7 @@ async function main(): Promise<void> {
   }, { host: dashboardServerConfig.host });
   log.info(`dashboard started at http://${dashboardServerConfig.host}:${dashboardServerConfig.port}`);
   log.info(`monitoring ${configuredGroupIds(dashboardConfig).length} group(s) with ${dashboardConfig.targets.length} rule(s)`);
-  await startGroupListener(seen, queues, cardState, sessions, cardClient, () => dashboardConfig, replies, liveReplies, runtime);
+  await startGroupListener(seen, queues, cardState, sessions, cardClient, () => dashboardConfig, applyDashboardConfig, replies, liveReplies, runtime);
 }
 
 main().catch((err) => {
