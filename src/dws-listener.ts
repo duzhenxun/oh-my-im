@@ -94,6 +94,11 @@ interface DwsConversationListResponse {
   conversations?: Array<{ openConversationId?: string; conversationName?: string }>;
 }
 
+interface DwsMessageSendResult {
+  failedCount?: number;
+  success?: boolean;
+}
+
 interface DwsGroupMembersResponse {
   complete?: boolean;
   partial?: boolean;
@@ -190,6 +195,20 @@ async function searchMonitorCommands(from: Date): Promise<DwsMessageEvent[]> {
     sender: message.sender ? { name: message.sender } : undefined,
     content: message.text || message.content,
   }));
+}
+
+async function sendRobotText(groupId: string, robotCode: string, content: string): Promise<void> {
+  const result = await runDwsJson<DwsMessageSendResult>([
+    "chat", "+messages-send",
+    "--as", "bot",
+    "--robot-code", robotCode,
+    "--groups", groupId,
+    "--text", content,
+    "--yes",
+  ]);
+  if (result.success === false || (result.failedCount ?? 0) > 0) {
+    throw new Error("机器人普通消息发送失败");
+  }
 }
 
 function runDwsJson<T>(args: string[]): Promise<T> {
@@ -483,14 +502,12 @@ async function resolveCommandGroupName(groupId: string, config: DashboardConfig)
 
 async function handleMonitorCommand(
   command: MonitorCommand,
-  event: DwsMessageEvent,
   groupId: string,
-  cardClient: DingTalkCardClient,
   getDashboardConfig: () => DashboardConfig,
   updateDashboardConfig: (config: DashboardConfig) => Promise<void>,
 ): Promise<void> {
-  if (!cardClient.enabled) throw new Error("无法执行 AI 管理命令：请先在管理页配置卡片机器人凭证和 Robot Code");
   const config = getDashboardConfig();
+  if (!config.robotCode.trim()) throw new Error("无法执行 AI 管理命令：请先在管理页配置机器人 Robot Code");
   const target = {
     groupId,
     groupName: await resolveCommandGroupName(groupId, config),
@@ -500,9 +517,8 @@ async function handleMonitorCommand(
   const result = applyMonitorCommand(config, command, target);
   if (result.changed) await updateDashboardConfig(result.config);
 
-  const action = command === "open" ? "已开启" : "已停止";
-  const detail = command === "open" ? "本群已开启AI功能。" : "本群已停止AI相关功能。";
-  await cardClient.create(groupId, randomUUID(), `钉钉群 ${target.groupName} - AI ${action}`, detail);
+  const detail = command === "open" ? "注意啦～本群 映客活动AI 解锁🔓" : "注意啦～本群 映客活动AI 已休眠💤";
+  await sendRobotText(groupId, config.robotCode, detail);
   log.info(`monitor command=${command} group=${groupId} changed=${result.changed}`);
 }
 
@@ -842,7 +858,7 @@ function startGroupListener(
     if (command) {
       if (command === "stop") queues.get(groupId)?.pending.splice(0);
       monitorCommandChain = monitorCommandChain
-        .then(() => handleMonitorCommand(command, event, groupId, cardClient, getDashboardConfig, updateDashboardConfig))
+        .then(() => handleMonitorCommand(command, groupId, getDashboardConfig, updateDashboardConfig))
         .catch((err) => log.error(`monitor command failed: ${String(err)}`));
       return;
     }

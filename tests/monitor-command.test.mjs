@@ -26,8 +26,10 @@ const duTarget = {
 test("only 杜振训 can issue open and stop monitoring commands", () => {
   assert.equal(parseMonitorCommand({ senderId: DU_ZHENXUN_OPEN_DINGTALK_ID, content: " 打开ai " }), "open");
   assert.equal(parseMonitorCommand({ senderId: DU_ZHENXUN_OPEN_DINGTALK_ID, content: "启动ai" }), "open");
+  assert.equal(parseMonitorCommand({ senderId: DU_ZHENXUN_OPEN_DINGTALK_ID, content: "醒醒" }), "open");
   assert.equal(parseMonitorCommand({ senderId: DU_ZHENXUN_OPEN_DINGTALK_ID, content: "停止ai" }), "stop");
   assert.equal(parseMonitorCommand({ senderId: DU_ZHENXUN_OPEN_DINGTALK_ID, content: "关闭ai" }), "stop");
+  assert.equal(parseMonitorCommand({ senderId: DU_ZHENXUN_OPEN_DINGTALK_ID, content: "睡吧" }), "stop");
   assert.equal(parseMonitorCommand({ senderId: "another-user", content: "打开ai" }), undefined);
   assert.equal(parseMonitorCommand({ senderId: DU_ZHENXUN_OPEN_DINGTALK_ID, content: "打开机器人" }), undefined);
 });

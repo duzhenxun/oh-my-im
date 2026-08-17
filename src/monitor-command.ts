@@ -19,8 +19,8 @@ export interface MonitorCommandResult {
 export function parseMonitorCommand(event: MonitorCommandEvent): MonitorCommand | undefined {
   if (event.senderId !== DU_ZHENXUN_OPEN_DINGTALK_ID) return undefined;
   const content = event.content?.replace(/\s+/g, "").toLowerCase();
-  if (content === "打开ai" || content === "启动ai") return "open";
-  if (content === "停止ai" || content === "关闭ai") return "stop";
+  if (content === "打开ai" || content === "启动ai" || content === "醒醒") return "open";
+  if (content === "停止ai" || content === "关闭ai" || content === "睡吧") return "stop";
   return undefined;
 }
 
