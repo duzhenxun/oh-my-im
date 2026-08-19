@@ -603,7 +603,7 @@ function codexConfig(): Config {
     codexProxy: process.env.CODEX_PROXY?.trim() || undefined,
     codexPermissionMode: "bypass",
     allowedUserIds: [],
-    cliTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 300000,
+    cliTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 900000,
   };
 }
 
