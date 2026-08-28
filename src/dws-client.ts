@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { GroupMatch, GroupMember, UserMatch } from "./dws-dashboard.js";
 
 export interface DwsMessageEvent {
+  [key: string]: unknown;
   event_id?: string;
   conversation_id?: string;
   conversationId?: string;
@@ -26,6 +27,9 @@ interface DwsMessageListResponse {
   messages?: Array<{
     conversationId?: string; createTime?: string; messageId?: string; sender?: string;
     senderId?: string; senderOpenDingTalkId?: string; text?: string; content?: string;
+    atUsers?: unknown; atUserIds?: unknown; atOpenDingTalkIds?: unknown;
+    at_users?: unknown; at_user_ids?: unknown; at_open_dingtalk_ids?: unknown;
+    mentions?: unknown;
   }>;
 }
 interface DwsChatSearchResponse { chats?: Array<{ openConversationId?: string; name?: string; title?: string; memberCount?: number }>; }

@@ -79,6 +79,35 @@ interface ListenerRuntime {
   activeBatches: number;
 }
 
+function hasMention(event: DwsMessageEvent): boolean {
+  const hasValue = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.length > 0;
+    return typeof value === "string" ? value.trim().length > 0 : Boolean(value);
+  };
+
+  // DWS has returned mention metadata under several names in different
+  // message APIs. Check the complete event instead of relying on one schema.
+  const visit = (value: unknown, depth = 0): boolean => {
+    if (!value || depth > 4) return false;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value !== "object") return false;
+    return Object.entries(value as Record<string, unknown>).some(([key, child]) => {
+      const normalized = key.toLowerCase().replace(/[-_]/g, "");
+      if (normalized === "at" || normalized.startsWith("atuser") || normalized.startsWith("atopendingtalk") || normalized.startsWith("mention")) {
+        return hasValue(child) || visit(child, depth + 1);
+      }
+      return visit(child, depth + 1);
+    });
+  };
+  if (visit(event)) return true;
+
+  // History APIs can flatten mention metadata into the message text. A mention
+  // is an @ token at the start of a message or after whitespace; this avoids
+  // treating normal email addresses as mentions.
+  const content = (event.content || event.text || "").trim();
+  return /(?:^|\s)@[^\s]+/u.test(content);
+}
+
 function eventKey(event: DwsMessageEvent, groupId: string): string | undefined {
   const messageId = event.message_id || event.messageId || event.openMessageId;
   if (messageId?.trim()) return `${groupId}:message:${messageId.trim()}`;
@@ -855,6 +884,10 @@ function startGroupListener(
     }
     if (isIgnoredRobotEvent(event, config)) {
       log.debug(`ignored robot message event=${event.event_id || "unknown"}`);
+      return;
+    }
+    if (hasMention(event)) {
+      log.info(`ignored mentioned group message group=${groupId} sender=${getSenderId(event)}`);
       return;
     }
     const key = eventKey(event, groupId);
