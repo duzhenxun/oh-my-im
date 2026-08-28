@@ -524,9 +524,11 @@ function isIgnoredRobotEvent(event: DwsMessageEvent, config: DashboardConfig): b
   // DWS history records are not consistent about exposing the sender name.
   // Never feed our own agent-switch acknowledgement back into the command
   // parser. The acknowledgement deliberately contains the words "Pi" or
-  // "Codex", so parsing it as a new command causes an infinite reply loop.
+  // "Codex", so parsing it as a new command causes duplicate acknowledgements.
   const content = (event.content || event.text || "").trim();
-  if (/^当前已切换到\s*(?:Pi|Codex)\s*[。.!！]?/i.test(content) && /当前\s*Agent\s*[：:]/i.test(content)) return true;
+  const isSwitchAcknowledgement = /^当前已切换到\s*(?:Pi|Codex)\s*[。.!！]?/i.test(content) &&
+    /使用方法：?\s*直接发送问题或任务即可/i.test(content);
+  if (isSwitchAcknowledgement) return true;
   return false;
 }
 
@@ -902,8 +904,23 @@ function startGroupListener(
       { senderId: getSenderId(event), content: rawContent },
       config.commandKeywords,
     );
+    log.info(`group event classified group=${groupId} sender=${getSenderId(event)} command=${typeof command === "object" ? `${command.type}:${command.agent}` : command || "message"} configuredTargets=${config.targets.filter((target) => target.groupId === groupId).length}`);
+    if (options.commandsOnly && command !== "open" && command !== "stop") return;
+    if (options.commandsOnly && !command) return;
     if (command) {
-      const commandKey = `${groupId}:${getSenderId(event)}:${rawContent.toLowerCase()}`;
+      // Agent switch commands used to be accepted from any sender. When the
+      // bot acknowledgement came back without a reliable robot name, its
+      // words "Pi"/"Codex" were parsed as another switch command and another
+      // acknowledgement was sent. The robot acknowledgement is filtered
+      // above; all agent-control commands must also come from an authorized
+      // operator.
+      if (typeof command === "object" && command.type === "switch-agent" && !isBotAuthorizedOperator(event, config)) {
+        log.debug(`ignored agent switch from unauthorized sender=${getSenderId(event)}`);
+        return;
+      }
+      const commandName = typeof command === "object" ? `${command.type}:${command.agent}` : command;
+      const normalizedCommandContent = rawContent.trim().toLowerCase();
+      const commandKey = `${groupId}:${getSenderId(event)}:${commandName}:${normalizedCommandContent}`;
       const previous = recentCommands.get(commandKey);
       const now = Date.now();
       if (previous && now - previous < commandDeduplicationMs) {
@@ -914,11 +931,6 @@ function startGroupListener(
       for (const [key, timestamp] of recentCommands) {
         if (now - timestamp >= commandDeduplicationMs) recentCommands.delete(key);
       }
-    }
-    log.info(`group event classified group=${groupId} sender=${getSenderId(event)} command=${typeof command === "object" ? `${command.type}:${command.agent}` : command || "message"} configuredTargets=${config.targets.filter((target) => target.groupId === groupId).length}`);
-    if (options.commandsOnly && command !== "open" && command !== "stop") return;
-    if (options.commandsOnly && !command) return;
-    if (command) {
       if (command === "pause") {
         if (!acceptsTarget(event, getDashboardConfig())) {
           log.debug(`ignored pause from unmonitored sender=${getSenderId(event)}`);
