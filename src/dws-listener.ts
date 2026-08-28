@@ -664,6 +664,7 @@ async function handleBatch(
     let lastText = "";
     const result = await runAgent(agent, buildPrompt(events), sessionId, codexConfig(), {
       onAbortReady: (abort) => { if (queue) queue.abort = abort; },
+      onSteerReady: (steer) => { if (queue && agent === "pi") queue.steer = steer; },
       onToolUse: (toolName, stats) => {
         log.info(`codex tool=${toolName} count=${stats[toolName] ?? 1}`);
         liveReply.content = `正在调用工具：${toolName}`;
@@ -754,7 +755,9 @@ interface GroupQueue {
   pending: DwsMessageEvent[];
   running: boolean;
   paused?: boolean;
+  activeAgent?: Config["agent"];
   abort?: () => void;
+  steer?: (message: string) => boolean;
 }
 
 async function enqueueGroupEvent(
@@ -771,13 +774,27 @@ async function enqueueGroupEvent(
 ): Promise<void> {
   const queue = queues.get(groupId) ?? { pending: [], running: false };
   queues.set(groupId, queue);
-  queue.pending.push(event);
   if (queue.running) {
+    const content = (event.content || event.text || "").trim();
+    if (queue.activeAgent === "pi" && queue.steer && content) {
+      const steered = queue.steer(content);
+      if (steered) {
+        void sendRobotText(groupId, getDashboardConfig().robotCode, "已将这条消息作为引导发送给当前 Pi 任务。")
+          .catch((err) => log.warn(`steer acknowledgement failed: ${String(err)}`));
+        log.info(`steered message=${event.message_id || "unknown"} group=${groupId}`);
+        return;
+      }
+      void sendRobotText(groupId, getDashboardConfig().robotCode, "当前 Pi 任务暂时无法接收引导，消息已排队等待处理。")
+        .catch((err) => log.warn(`queue acknowledgement failed: ${String(err)}`));
+    }
+    queue.pending.push(event);
     log.info(`queued message=${event.message_id || "unknown"} pending=${queue.pending.length}`);
     return;
   }
+  queue.pending.push(event);
 
   queue.running = true;
+  queue.activeAgent = getDashboardConfig().agent;
   runtime.activeBatches += 1;
   try {
     while (queue.pending.length > 0) {
@@ -787,6 +804,9 @@ async function enqueueGroupEvent(
     }
   } finally {
     queue.running = false;
+    queue.activeAgent = undefined;
+    queue.abort = undefined;
+    queue.steer = undefined;
     runtime.activeBatches -= 1;
   }
 }

@@ -10,7 +10,7 @@ interface ConversationState {
   sessions: Partial<Record<Config["agent"], string>>;
   busy: boolean;
   abort?: () => void;
-  steer?: (message: string) => void;
+  steer?: (message: string) => boolean;
   activeAgent?: Config["agent"]; 
   paused?: boolean;
 }
@@ -227,8 +227,10 @@ export async function runApp(
     const state = getState(conversations, message.conversationId);
     if (state.busy) {
       if (state.activeAgent === "pi" && state.steer && text) {
-        state.steer(text);
-        await bot.sendText(message.conversationId, "已将这条消息作为引导发送给当前 Pi 任务。");
+        const steered = state.steer(text);
+        await bot.sendText(message.conversationId, steered
+          ? "已将这条消息作为引导发送给当前 Pi 任务。"
+          : "当前 Pi 任务暂时无法接收引导，消息已排队等待处理。" );
       } else {
         await bot.sendText(message.conversationId, "当前 Agent 不支持运行中引导，请等待任务结束，或先发送暂停指令。");
       }

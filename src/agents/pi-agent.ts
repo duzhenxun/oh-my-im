@@ -76,7 +76,13 @@ export function runPi(
       }
     });
     callbacks.onSteerReady?.((message) => {
-      if (!completed) child.stdin.write(`${JSON.stringify({ type: "steer", message })}\n`);
+      if (completed || child.stdin.destroyed || !child.stdin.writable) return false;
+      try {
+        child.stdin.write(`${JSON.stringify({ type: "steer", message })}\n`);
+        return true;
+      } catch {
+        return false;
+      }
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
