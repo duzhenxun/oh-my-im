@@ -53,7 +53,8 @@ const EMPTY_COMMAND_KEYWORDS: DashboardConfig["commandKeywords"] = {
   pause: [], monitorOpen: [], monitorStop: [], switchPi: [], switchCodex: [],
 };
 const cardUpdateIntervalMs = 500;
-const historyPollIntervalMs = 3_000;
+const historyPollIntervalMs = 2_000;
+const historyLookbackMs = 60_000;
 const commandPollIntervalMs = 5_000;
 
 interface CardState {
@@ -978,21 +979,20 @@ function startGroupListener(
   // authenticated user from the event stream, and a short overlap protects the
   // gap between two history queries. eventKey() makes the two sources safe to
   // combine without running the same message twice.
-  let lastPollAt = new Date();
   let historyPollInFlight = false;
   const pollHistory = async () => {
     if (historyPollInFlight) return;
     historyPollInFlight = true;
-    const queryStartedAt = new Date();
     try {
+      // Use a fixed short lookback instead of an ever-advancing cursor. If the
+      // history API is unavailable for a long time, recovery will still query
+      // only the recent window rather than replaying a large backlog.
+      const from = new Date(Date.now() - historyLookbackMs);
       const groupIds = configuredGroupIds(getDashboardConfig());
       for (const groupId of groupIds) {
-        const messages = await listGroupMessages(groupId, lastPollAt);
+        const messages = await listGroupMessages(groupId, from);
         messages.forEach((event) => acceptEvent(event));
       }
-      // Keep a one-second overlap so messages created while the query was in
-      // flight are not missed. The shared seen set removes duplicates.
-      lastPollAt = new Date(queryStartedAt.getTime() - 1_000);
     } finally {
       historyPollInFlight = false;
     }
