@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+export type AgentType = "codex" | "pi";
+
 export interface Config {
   dingtalkClientId: string;
   dingtalkClientSecret: string;
@@ -9,6 +11,8 @@ export interface Config {
   codexModel?: string;
   codexProxy?: string;
   codexPermissionMode?: "bypass" | "read-only";
+  piCliPath?: string;
+  agent: AgentType;
   allowedUserIds: string[];
   cliTimeoutMs: number;
 }
@@ -17,6 +21,7 @@ interface LocalBotConfig {
   clientId?: string;
   clientSecret?: string;
   botAllowedUserIds?: string[];
+  agent?: AgentType;
 }
 
 function loadLocalBotConfig(): LocalBotConfig {
@@ -45,6 +50,8 @@ export function loadConfig(): Config {
     codexCliPath: "codex",
     codexWorkDir: resolveWorkDir(),
     codexPermissionMode: "bypass",
+    piCliPath: process.env.PI_CLI_PATH?.trim() || "pi",
+    agent: local.agent === "pi" ? "pi" : "codex",
     allowedUserIds: [...new Set((local.botAllowedUserIds ?? []).map((id) => id.trim()).filter(Boolean))],
     cliTimeoutMs: 30 * 60 * 1000,
   };

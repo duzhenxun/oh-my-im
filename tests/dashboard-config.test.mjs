@@ -6,11 +6,17 @@ test("dashboard accepts an empty target list after the final group is stopped", 
   let config = {
     targets: [{ groupId: "group", groupName: "群", senderId: "user", senderName: "人员" }],
     botAllowedUserIds: ["user"],
+    botAllowedUserNames: { user: "人员" },
     replyFormat: "markdown",
     robotName: "机器人",
     clientId: "client",
     clientSecret: "secret",
     robotCode: "robot",
+    agent: "codex",
+    commandKeywords: {
+      pause: ["停"], monitorOpen: ["打开ai"], monitorStop: ["停止ai"],
+      switchPi: ["切pi"], switchCodex: ["切codex"],
+    },
   };
   const server = startDashboard(0, {
     getConfig: () => config,
@@ -19,6 +25,7 @@ test("dashboard accepts an empty target list after the final group is stopped", 
     getReplies: () => [],
     searchGroups: async () => [],
     listGroupMembers: async () => [],
+    searchUsers: async () => [],
   });
   await new Promise((resolve) => server.once("listening", resolve));
   const address = server.address();
@@ -34,4 +41,5 @@ test("dashboard accepts an empty target list after the final group is stopped", 
   assert.equal(response.status, 200);
   assert.deepEqual(config.targets, []);
   assert.equal(config.clientSecret, "secret");
+  assert.deepEqual(config.botAllowedUserNames, { user: "人员" });
 });

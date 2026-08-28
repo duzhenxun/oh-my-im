@@ -119,10 +119,17 @@ codex exec resume --json --skip-git-repo-check <sessionId> -
 ## 模块划分
 
 ```text
-src/config.ts      配置读取和校验
-src/dingtalk.ts    钉钉 Stream 连接、消息解析、webhook 回复
-src/codex.ts       Codex CLI spawn、JSONL 解析、sessionId 提取
-src/index.ts       命令处理、白名单、忙碌状态、主流程编排
+src/config.ts                    配置类型、直接启动配置读取和校验
+src/dingtalk.ts                  钉钉 Stream 连接、消息解析、webhook 回复
+src/agents/index.ts              Agent 统一接口、类型与 Codex/Pi 路由
+src/agents/process-utils.ts      Agent 子进程共用的代理环境和严格 JSONL 读取
+src/agents/codex-agent.ts        Codex CLI spawn、JSONL 解析、sessionId 提取
+src/agents/pi-agent.ts           Pi RPC spawn、JSONL 解析、sessionId 提取
+src/bot-app.ts                   单聊命令、白名单、忙碌状态、主流程编排
+src/bot-worker.ts                omi 管理的一对一机器人进程入口
+src/dws-client.ts                DWS CLI 命令、JSON 解析、群/人员/消息查询与事件流
+src/dws-listener.ts              群规则、队列、Agent 调度和群卡片流程
+src/omi.ts                       后台进程管理 CLI（启动 bot-worker / dws-listener）
 ```
 
 ## 验证方式
@@ -217,7 +224,7 @@ LOG_LEVEL=debug npm run dev:dws
 
 启动 `omi` 或 `npm run dev:dws` 后，在浏览器打开 `http://127.0.0.1:12525`。页面只绑定本机回环地址，默认不对局域网开放。可查看事件连接状态、当前每条“群 + 人员”的监听规则和最近 100 条 Agent 完成/失败回复。
 
-页面可以按群名称搜索候选群并选中对应 `openConversationId`，随后加载该群全部真人成员，以复选框勾选一个或多个监听人员及其 `openDingTalkId`。一条页面规则可对应一个群的多个监听人员，保存时会展开为实际监听配置。不按名称自动取第一个候选，因此同名群或同名人员不会误配。页面还可配置机器人名称（仅作本地备注和处理提示显示）、钉钉应用 `Client ID`、卡片机器人 `Robot Code`、机器人单聊授权人员，以及卡片回复按 Markdown 或纯文本显示。机器人单聊授权人员是强制白名单，多个钉钉用户 ID 用逗号分隔；一对一机器人只接收其中人员的指令。`Client Secret` 采用密码输入框且永不回显；显示“已配置”时留空保存会保留原值，填写新值才会更新。点击“保存并生效”后，配置写入仅限本机的 `~/.oh-my-im/dws-dashboard.json`，同一监听进程立即按新规则、应用凭证和卡片设置工作；无需重启。首次启动会自动创建该文件及 `~/.oh-my-im/dws-dashboard-server.json`，因此 `npm run dev:dws` 不需要 `.env`。回复面板位于钉钉规则下方，最新的处理中内容每秒刷新一次，完成/失败后归档；向上滚动可查看旧记录。回复记录保存在 `~/.oh-my-im/dws-replies.json`，重启后仍可查看。
+页面可以按群名称搜索候选群并选中对应 `openConversationId`，随后加载该群全部真人成员，以复选框勾选一个或多个监听人员及其 `openDingTalkId`。一条页面规则可对应一个群的多个监听人员，保存时会展开为实际监听配置。不按名称自动取第一个候选，因此同名群或同名人员不会误配。页面还可配置机器人名称（仅作本地备注和处理提示显示）、钉钉应用 `Client ID`、卡片机器人 `Robot Code`、机器人单聊授权人员，以及卡片回复按 Markdown 或纯文本显示。机器人单聊授权人员是强制白名单，多个钉钉用户 ID 用逗号分隔；一对一机器人只接收其中人员的指令。`Client Secret` 采用密码输入框且永不回显；显示“已配置”时留空保存会保留原值，填写新值才会更新。点击“保存并生效”后，配置写入仅限本机的 `~/.oh-my-im/dws-dashboard.json`，同一监听进程立即按新规则、应用凭证和卡片设置工作；无需重启。首次启动会自动创建该文件及 `~/.oh-my-im/dws-dashboard-server.json`，因此 `npm run dev:dws` 不需要 `.env`。回复面板位于钉钉规则下方，最新的处理中内容每秒刷新一次，完成/失败后归档；向上滚动可查看旧记录。回复记录按日期保存在 `~/.oh-my-im/replies/YYYY-MM-DD.json`，重启后仍可查看；程序也会兼容读取旧的 `~/.oh-my-im/dws-replies.json`。
 
 管理页默认只绑定 `127.0.0.1`；端口和绑定地址保存在 `~/.oh-my-im/dws-dashboard-server.json`。页面不再内置访问密码，外网访问时应只通过具备认证能力的 HTTPS 反向代理或 VPN 暴露，并将该文件的 `host` 改为 `0.0.0.0`。
 

@@ -2,13 +2,11 @@
   "name": "oh-my-im",
   "version": "0.1.3",
   "type": "module",
-  "main": "dist/index.js",
   "files": [
     "dist",
     "README.md"
   ],
   "bin": {
-    "oh-my-im": "dist/cli.js",
     "omi": "dist/omi.js"
   },
   "repository": {
@@ -20,13 +18,13 @@
     "access": "public"
   },
   "scripts": {
-    "dev": "tsx src/cli.ts",
+    "dev:bot": "tsx src/bot-worker.ts",
     "dev:dws": "tsx src/dws-listener.ts",
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "start": "node dist/cli.js",
+    "start": "node dist/omi.js",
     "omi": "node dist/omi.js",
-    "help": "node dist/cli.js help"
+    "help": "node dist/omi.js help"
   },
   "dependencies": {
     "dingtalk-stream": "^2.1.4"

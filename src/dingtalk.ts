@@ -48,7 +48,9 @@ function safePreview(value: unknown, limit = 160): string {
 
 export function isSingleConversation(type?: string): boolean {
   const normalized = type?.trim().toLowerCase();
-  return normalized === "0" || normalized === "single" || normalized === "singlechat" || normalized === "oto";
+  // DingTalk robot callbacks use "1" for one-to-one conversations. Keep the
+  // textual aliases and legacy "0" compatibility for older payload variants.
+  return normalized === "1" || normalized === "0" || normalized === "single" || normalized === "singlechat" || normalized === "oto";
 }
 
 function buildStandardCardData(title: string, content: string): string {
@@ -232,7 +234,7 @@ export class DingTalkBot {
       }
 
       log.info(
-        `incoming conversation=${message.conversationId} msgtype=${message.msgtype} sender=${message.senderStaffId ?? message.senderId} textLen=${message.text.length} attachments=${message.attachments.length} hasWebhook=${Boolean(message.sessionWebhook)} hasRobotCode=${Boolean(message.robotCode)}`,
+        `incoming conversation=${message.conversationId} msgtype=${message.msgtype} senderId=${message.senderId} senderStaffId=${message.senderStaffId ?? "<none>"} senderNick=${message.senderNick ?? "<none>"} conversationType=${message.conversationType ?? "<none>"} text=${JSON.stringify(message.text.slice(0, 200))} textLen=${message.text.length} attachments=${message.attachments.length} hasWebhook=${Boolean(message.sessionWebhook)} hasRobotCode=${Boolean(message.robotCode)}`,
       );
 
       try {
@@ -286,7 +288,11 @@ export class DingTalkBot {
     log.debug(`reply ok conversation=${conversationId} status=${res.status}`);
   }
 
-  async sendThinkingCard(message: DingTalkTextMessage, content: string): Promise<DingTalkReplyHandle> {
+  async sendThinkingCard(
+    message: DingTalkTextMessage,
+    content: string,
+    title = "🔵 【Codex】处理中... (0秒)",
+  ): Promise<DingTalkReplyHandle> {
     if (!message.robotCode) {
       await this.sendText(message.conversationId, content);
       return { conversationId: message.conversationId, mode: "text" };
@@ -298,7 +304,7 @@ export class DingTalkBot {
       cardBizId,
       outTrackId: cardBizId,
       robotCode: message.robotCode,
-      cardData: buildStandardCardData("Codex - 执行中", content),
+      cardData: buildStandardCardData(title, content),
     };
 
     if (isSingleConversation(message.conversationType) && message.senderStaffId) {

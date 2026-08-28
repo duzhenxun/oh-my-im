@@ -12,7 +12,7 @@ function buildCardData(title: string, content: string): string {
   return JSON.stringify({
     config: { autoLayout: true, enableForward: true },
     header: {
-      title: { type: "text", text: title.trim() || "映客活动AI" },
+      title: { type: "text", text: title.trim() || "AI Agent" },
       logo: "@lALPDfJ6V_FPDmvNAfTNAfQ",
     },
     contents: [{ type: "markdown", text: content.trim() || "处理中...", id: "content" }],
@@ -56,7 +56,7 @@ export class DingTalkCardClient {
 
   async create(groupId: string, cardBizId: string, title: string, content: string): Promise<CardReplyHandle> {
     if (!this.enabled) {
-      throw new Error("映客活动AI 卡片未启用：DINGTALK_CLIENT_ID 或 DINGTALK_CLIENT_SECRET 缺失");
+      throw new Error("钉钉卡片未启用：Client ID、Client Secret 或 Robot Code 缺失");
     }
 
     try {
@@ -73,7 +73,7 @@ export class DingTalkCardClient {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.error(`card start failed: ${message}`);
-      throw new Error(`映客活动AI 卡片发送失败：${message}`);
+      throw new Error(`钉钉卡片发送失败：${message}`);
     }
   }
 

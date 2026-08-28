@@ -33,7 +33,7 @@ const stateFile = join(stateDir, "omi-state.json");
 const logFile = join(stateDir, "omi.log");
 const here = dirname(fileURLToPath(import.meta.url));
 const listenerPath = join(here, "dws-listener.js");
-const botPath = join(here, "omi-bot.js");
+const botPath = join(here, "bot-worker.js");
 
 function printHelp(): void {
   console.log([
