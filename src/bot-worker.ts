@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import type { CommandKeywordsConfig } from "./dws-dashboard.js";
 const stateDir = join(homedir(), ".oh-my-im");
 const dashboardConfigFile = join(stateDir, "dws-dashboard.json");
 const lockFile = join(stateDir, "omi-bot.lock");
+const botStatusFile = join(stateDir, "omi-bot-status.json");
 const defaultWorkDir = process.env.AGENT_WORK_DIR?.trim() || process.cwd();
 
 interface DashboardCredentials {
@@ -20,6 +21,7 @@ interface DashboardCredentials {
   agent?: "codex" | "pi";
   botAllowedUserNames?: Record<string, string>;
   commandKeywords?: CommandKeywordsConfig;
+  privateChatEnabled?: boolean;
 }
 
 async function acquireLock(): Promise<() => Promise<void>> {
@@ -74,6 +76,20 @@ function loadBotConfig(): Config {
   };
 }
 
+function writeBotStatus(enabled: boolean, connected: boolean): void {
+  try { writeFileSync(botStatusFile, `${JSON.stringify({ pid: process.pid, enabled, connected, updatedAt: new Date().toISOString() })}\n`, "utf8"); } catch { /* status is diagnostic only */ }
+}
+
+function markBotStopped(): void {
+  try {
+    const current = JSON.parse(readFileSync(botStatusFile, "utf8")) as { pid?: number };
+    // An old worker can finish its shutdown after a replacement worker starts;
+    // never let that stale process overwrite the replacement's live status.
+    if (current.pid !== process.pid) return;
+  } catch { return; }
+  writeBotStatus(false, false);
+}
+
 const releaseLock = await acquireLock();
 process.once("exit", () => {
   try {
@@ -85,6 +101,7 @@ process.once("exit", () => {
 
 try {
   const config = loadBotConfig();
+  writeBotStatus(true, false);
   await runApp(config, {
     singleChatOnly: true,
     getAgent: () => {
@@ -111,6 +128,19 @@ try {
         return [];
       }
     },
+    onConnectionStatus: (connected) => {
+      // The configuration file is the source of truth. Do not preserve the
+      // previous status file's enabled=false value when a new worker connects.
+      let enabled = true;
+      try {
+        enabled = (JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials).privateChatEnabled !== false;
+      } catch { /* keep the safe default */ }
+      writeBotStatus(enabled, connected);
+    },
+    getPrivateChatEnabled: () => {
+      try { return (JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials).privateChatEnabled !== false; }
+      catch { return true; }
+    },
     getAllowedUserIds: () => {
       try {
         const current = JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials;
@@ -125,5 +155,6 @@ try {
     },
   });
 } finally {
+  markBotStopped();
   await releaseLock();
 }

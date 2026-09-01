@@ -488,13 +488,38 @@ export async function runApp(
     getAllowedUserIds?: () => string[];
     getCommandKeywords?: () => CommandKeywordsConfig | undefined;
     getSuperAdminUserIds?: () => string[];
+    getPrivateChatEnabled?: () => boolean;
+    onConnectionStatus?: (connected: boolean) => void;
   } = {},
 ): Promise<void> {
   const config = configOverride ?? loadConfig();
   const bot = new DingTalkBot(config);
   const conversations = new Map<string, ConversationState>();
+  // Stream callbacks may be redelivered when the first callback is still
+  // running (we only ACK after onMessage completes). Without message-level
+  // deduplication, one user message can enter the busy branch again and emit
+  // the misleading "后续消息" acknowledgement even though the user sent it
+  // only once.
+  const handledCallbackIds = new Set<string>();
+  const handledCallbackIdLimit = 2_000;
 
   async function handleMessage(message: DingTalkTextMessage): Promise<void> {
+    if (options.getPrivateChatEnabled?.() === false) {
+      log.info(`ignored private message while private chat is disabled conversation=${message.conversationId}`);
+      return;
+    }
+    if (message.callbackId?.trim()) {
+      const callbackId = message.callbackId.trim();
+      if (handledCallbackIds.has(callbackId)) {
+        log.warn(`ignored duplicate DingTalk callback callbackId=${callbackId} conversation=${message.conversationId} text=${JSON.stringify(message.text.slice(0, 120))}`);
+        return;
+      }
+      handledCallbackIds.add(callbackId);
+      if (handledCallbackIds.size > handledCallbackIdLimit) {
+        handledCallbackIds.delete(handledCallbackIds.values().next().value as string);
+      }
+    }
+
     log.info(
       `received message conversation=${message.conversationId} conversationType=${message.conversationType ?? "<none>"} msgtype=${message.msgtype} senderNick=${message.senderNick ?? "<none>"} senderId=${message.senderId} senderStaffId=${message.senderStaffId ?? "<none>"} text=${JSON.stringify(message.text.slice(0, 500))} textLen=${message.text.length} attachmentCount=${message.attachments.length}`,
     );
@@ -750,6 +775,53 @@ export async function runApp(
     process.exit(0);
   });
 
-  await bot.start(handleMessage);
+  let privateChatConnected = false;
+  let privateChatStarting = false;
+  let privateChatGeneration = 0;
+  const privateChatTimer = setInterval(() => {
+    const enabled = options.getPrivateChatEnabled?.() ?? true;
+    if (!enabled) {
+      privateChatGeneration += 1;
+      if (privateChatConnected || privateChatStarting) {
+        privateChatConnected = false;
+        privateChatStarting = false;
+        bot.stop();
+        options.onConnectionStatus?.(false);
+        log.info("private chat stream stopped by configuration");
+      }
+      return;
+    }
+    if (privateChatConnected || privateChatStarting) return;
+    privateChatStarting = true;
+    const generation = privateChatGeneration;
+    log.info("private chat stream starting by configuration");
+    void bot.start(handleMessage).then(() => {
+      if (generation !== privateChatGeneration || options.getPrivateChatEnabled?.() === false) {
+        bot.stop();
+        return;
+      }
+      privateChatStarting = false;
+      privateChatConnected = true;
+      options.onConnectionStatus?.(true);
+      log.info("private chat stream started by configuration");
+    }).catch((err) => {
+      privateChatStarting = false;
+      privateChatConnected = false;
+      options.onConnectionStatus?.(false);
+      log.error("private chat stream restart failed", err);
+    });
+  }, 1_000);
+  // Keep the worker alive while private chat is disabled so a later dashboard
+  // toggle can start the Stream connection without requiring a process restart.
+  if (options.getPrivateChatEnabled?.() === false) {
+    privateChatConnected = false;
+    log.info("private chat stream disabled by configuration");
+  } else {
+    privateChatStarting = true;
+    await bot.start(handleMessage);
+    privateChatStarting = false;
+    privateChatConnected = true;
+    options.onConnectionStatus?.(true);
+  }
   log.info(`ready workDir=${config.codexWorkDir} codex=${config.codexCliPath}`);
 }

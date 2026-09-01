@@ -26,6 +26,7 @@ import {
   getDwsDeviceLoginOutput,
   logoutDws,
   listGroupBots,
+  addBotToGroup,
   listGroupMembers,
   searchGroups,
   searchUsers,
@@ -36,12 +37,19 @@ import {
 import type { GroupMember } from "./dws-dashboard.js";
 import { createLogger } from "./logger.js";
 import { sendRobotGroupText } from "./dingtalk-robot.js";
+import { runDwsJson } from "./dws-client.js";
 import { appendConversationLog } from "./conversation-log.js";
 
 const log = createLogger("DwsCodexListener");
 
-function sendRobotText(groupId: string, config: DashboardConfig, content: string): Promise<void> {
-  return sendRobotGroupText(groupId, content, config.clientId, config.clientSecret);
+async function sendDwsFallbackText(groupId: string, content: string): Promise<void> {
+  const result = await runDwsJson<{ success?: boolean; failedCount?: number }>(["chat", "message", "send", "--group", groupId, "--text", content, "--yes"]);
+  if (result.success === false || (result.failedCount ?? 0) > 0) throw new Error("DWS 失败原因通知发送失败");
+}
+
+async function sendRobotText(groupId: string, config: DashboardConfig, content: string): Promise<void> {
+  log.info(`robot API send group=${groupId} robotCode=${config.clientId} robotName=${config.robotName}`);
+  return sendRobotGroupText(groupId, content, config.clientId, config.clientId, config.clientSecret);
 }
 const DEFAULT_CODEX_WORK_DIR = process.cwd();
 const DEFAULT_DWS_CODEX_TIMEOUT_MS = 300_000;
@@ -266,6 +274,7 @@ function normalizeDashboardConfig(parsed: DashboardConfig): DashboardConfig {
   const targets = parsed.targets;
   return {
     ...parsed,
+    privateChatEnabled: parsed.privateChatEnabled !== false,
     targets,
     botAllowedUserIds: Array.isArray(parsed.botAllowedUserIds) && parsed.botAllowedUserIds.length > 0
       ? [...new Set(parsed.botAllowedUserIds.map((id) => id.trim()).filter(Boolean))]
@@ -349,6 +358,7 @@ async function loadDashboardConfig(): Promise<DashboardConfig> {
   if (stored) return stored;
   const targets = createDefaultTargets();
   return {
+    privateChatEnabled: true,
     targets,
     botAllowedUserIds: defaultBotAllowedUserIds(targets),
     botAllowedUserNames: Object.fromEntries(targets.map((target) => [target.senderId, target.senderName])),
@@ -463,7 +473,11 @@ const conversationNameCache = new Map<string, string>();
 async function groupHasConfiguredRobot(groupId: string, config: DashboardConfig): Promise<boolean> {
   const configuredId = config.robotSenderOpenDingTalkId?.trim();
   const configuredName = config.robotName.trim();
-  if (!configuredId && !configuredName) return false;
+  log.info(`checking configured robot group=${groupId} configuredId=${configuredId || "<none>"} configuredName=${configuredName || "<none>"}`);
+  if (!configuredId && !configuredName) {
+    log.warn(`configured robot check failed: no robot ID or name group=${groupId}`);
+    return false;
+  }
   try {
     const [groupBots, matchingBots] = await Promise.all([
       listGroupBots(groupId),
@@ -474,9 +488,9 @@ async function groupHasConfiguredRobot(groupId: string, config: DashboardConfig)
     // then compare names across the two identifier namespaces.
     const canonicalName = matchingBots.find((bot) => bot.openDingTalkId === configuredId)?.name;
     const acceptedNames = new Set([configuredName, canonicalName].filter((name): name is string => Boolean(name)));
-    return groupBots.some((bot) =>
-      bot.openBotId === configuredId || acceptedNames.has(bot.name),
-    );
+    const present = groupBots.some((bot) => bot.openBotId === configuredId || acceptedNames.has(bot.name));
+    log.info(`configured robot check group=${groupId} present=${present} groupBots=${JSON.stringify(groupBots)} matchedBots=${JSON.stringify(matchingBots)}`);
+    return present;
   } catch (err) {
     log.warn(`unable to inspect group robots group=${groupId}: ${String(err)}`);
     return false;
@@ -522,14 +536,15 @@ async function handleMonitorCommand(
   groupId: string,
   getDashboardConfig: () => DashboardConfig,
   updateDashboardConfig: (config: DashboardConfig) => Promise<void>,
+  sendReply = true,
 ): Promise<void> {
   const config = getDashboardConfig();
   const senderId = getSenderId(event);
   if (!senderId || senderId === "unknown") return;
-  const sender = event.sender ?? {};
-  const senderName = [sender.name, sender.nick, sender.displayName]
-    .find((value): value is string => typeof value === "string" && Boolean(value.trim()))
-    ?.trim() || senderId;
+  const senderName = senderDisplayName(event) ||
+    config.botAllowedUserNames?.[senderId]?.trim() ||
+    config.targets.find((target) => target.groupId === groupId && target.senderId === senderId)?.senderName ||
+    senderId;
   const target = {
     groupId,
     groupName: await resolveCommandGroupName(groupId, config),
@@ -544,8 +559,8 @@ async function handleMonitorCommand(
     : command === "open"
       ? `已开启 ${senderName} 在本群的AI 能力。`
       : `已关闭 ${senderName} 在本群的AI 能力。`;
-  await sendRobotText(groupId, config, detail);
-  log.info(`monitor command=${typeof command === "object" ? command.type + ":" + command.agent : command} group=${groupId} changed=${result.changed}`);
+  if (sendReply) await sendRobotText(groupId, config, detail);
+  log.info(`monitor command=${typeof command === "object" ? command.type + ":" + command.agent : command} group=${groupId} changed=${result.changed} replied=${sendReply}`);
 }
 
 function senderDisplayName(event: DwsMessageEvent): string {
@@ -1021,7 +1036,12 @@ function startGroupListener(
 
   log.info(`starting ${dwsPath} ${args.join(" ")}`);
   const listener = startGroupEventStream(DWS_GROUP_MESSAGE_EVENT, maxEvents);
+  // The DWS CLI keeps the event stream process open and normally produces no
+  // stdout until an event arrives. Treat a successfully spawned, still-live
+  // process as connected; waiting for message data made the dashboard report
+  // a false "事件未连接" while the listener was healthy but idle.
   runtime.eventConnected = true;
+  log.info("DWS group event stream process started");
   let monitorCommandChain = Promise.resolve();
   // DWS can expose the same control message through both the stream and the
   // history search with different event IDs. Suppress an identical command
@@ -1057,7 +1077,9 @@ function startGroupListener(
     }
     const rawContent = (event.content || event.text || "").trim();
     const mentionCommand = parseMentionMonitorCommand(rawContent, config.commandKeywords, mentionValues(event).length > 0);
-    if (mentionCommand && isBotAuthorizedOperator(event, config)) {
+    const authorizedOperator = isBotAuthorizedOperator(event, config);
+    log.info(`command precheck group=${groupId} sender=${getSenderId(event)} senderName=${senderDisplayName(event) || "<none>"} content=${JSON.stringify(rawContent)} mentionCommand=${mentionCommand || "none"} authorized=${authorizedOperator} targets=${config.targets.filter((target) => target.groupId === groupId).length}`);
+    if (mentionCommand && authorizedOperator) {
       const mentionKey = `${groupId}:mention:${getSenderId(event)}:${mentionCommand}:${rawContent.replace(/\s+/g, "").toLowerCase()}`;
       if (handledMentionCommands.has(mentionKey)) {
         log.debug(`handled mention command ignored group=${groupId} command=${rawContent}`);
@@ -1147,12 +1169,39 @@ function startGroupListener(
         .then(async () => {
           const requiresGroupRobot = command === "open" || command === "stop" ||
             (typeof command === "object" && command.type === "switch-agent");
-          if (requiresGroupRobot && !await groupHasConfiguredRobot(groupId, getDashboardConfig())) {
-            log.info(`ignored command because configured robot is not in group=${groupId}`);
-            return;
+          const hasRobot = await groupHasConfiguredRobot(groupId, getDashboardConfig());
+          if (requiresGroupRobot && !hasRobot) {
+            if (command === "open") {
+              log.info(`open command needs bot installation group=${groupId} sender=${getSenderId(event)}`);
+              const currentConfig = getDashboardConfig();
+              if (!currentConfig.clientId.trim()) {
+                log.warn(`ignored monitor open because client ID is missing group=${groupId}`);
+                return;
+              }
+              const robotCode = currentConfig.clientId.trim();
+              log.info(`adding configured bot to group=${groupId} robotCode=${robotCode}`);
+              try {
+                await addBotToGroup(groupId, robotCode);
+                log.info(`configured bot added to group=${groupId}`);
+              } catch (err) {
+                const reason = err instanceof Error ? err.message : String(err);
+                log.error(`configured bot add failed group=${groupId}: ${reason}`);
+                await sendDwsFallbackText(groupId, `AI 能力开启失败：配置机器人加入本群失败。\n失败原因：${reason}`)
+                  .catch((notifyErr) => log.error(`DWS failure notification failed group=${groupId}: ${String(notifyErr)}`));
+                return;
+              }
+            } else if (command === "stop") {
+              // Stop must still remove the sender's own rule when the bot has
+              // already been removed from the group; only the acknowledgement
+              // depends on the bot being present.
+              log.info(`stopping monitor rule without bot acknowledgement group=${groupId} sender=${getSenderId(event)}`);
+            } else {
+              log.info(`ignored command because configured robot is not in group=${groupId}`);
+              return;
+            }
           }
           if (command === "stop") queues.get(groupId)?.pending.splice(0);
-          await handleMonitorCommand(command, event, groupId, getDashboardConfig, updateDashboardConfig);
+          await handleMonitorCommand(command, event, groupId, getDashboardConfig, updateDashboardConfig, hasRobot);
         })
         .catch((err) => log.error(`monitor command failed: ${String(err)}`));
       return;
@@ -1236,7 +1285,11 @@ function startGroupListener(
   mentionPollTimer.unref();
 
   return new Promise<void>((resolve, reject) => {
-    listener.on("error", reject);
+    listener.on("error", (err) => {
+      runtime.eventConnected = false;
+      log.error(`DWS group event stream error: ${String(err)}`);
+      reject(err);
+    });
     listener.on("close", (code) => {
       runtime.eventConnected = false;
       clearInterval(historyPollTimer);
@@ -1325,6 +1378,15 @@ async function main(): Promise<void> {
     startDwsDeviceLogin,
     getDwsDeviceLoginOutput,
     logoutDws,
+    getBotStatus: async () => {
+      const enabled = dashboardConfig.privateChatEnabled !== false;
+      try {
+        const value = JSON.parse(await readFile(join(DATA_DIR, "omi-bot-status.json"), "utf8")) as { connected?: boolean; updatedAt?: string };
+        return { enabled, connected: enabled && value.connected !== false, updatedAt: value.updatedAt };
+      } catch {
+        return { enabled, connected: false };
+      }
+    },
   }, { host: dashboardServerConfig.host });
   log.info(`dashboard started at http://${dashboardServerConfig.host}:${dashboardServerConfig.port}`);
   log.info(`monitoring ${configuredGroupIds(dashboardConfig).length} group(s) with ${dashboardConfig.targets.length} rule(s)`);

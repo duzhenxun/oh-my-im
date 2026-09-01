@@ -38,7 +38,10 @@ interface DwsConversationListResponse { conversations?: Array<{ openConversation
 interface DwsSelfResponse { userId?: string; openDingTalkId?: string; openDingtalkId?: string; name?: string; email?: string; dept?: string; org?: string; }
 interface DwsAuthStatusResponse { authenticated?: boolean; token_valid?: boolean; refresh_token_valid?: boolean; expires_at?: string; refresh_expires_at?: string; corp_id?: string; corp_name?: string; user_id?: string; user_name?: string; error?: string; message?: string; }
 interface DwsMessageSendResult { failedCount?: number; success?: boolean; }
-interface DwsBotSearchResponse { bots?: Array<{ openDingTalkId?: string; name?: string }>; }
+interface DwsBotSearchResponse {
+  bots?: Array<{ openDingTalkId?: string; botOpenDingTalkId?: string; name?: string }>;
+  result?: { bots?: Array<{ openDingTalkId?: string; botOpenDingTalkId?: string; name?: string }> };
+}
 interface DwsUserSearchResponse {
   users?: Array<{ openDingtalkId?: string; openDingTalkId?: string; userId?: string; name?: string; nick?: string; department?: string }>;
   items?: Array<{ openDingtalkId?: string; openDingTalkId?: string; userId?: string; name?: string; nick?: string; department?: string }>;
@@ -50,6 +53,7 @@ interface DwsGroupMembersResponse {
 interface DwsGroupBotsResponse {
   bots?: Array<{ openBotId?: string; name?: string }>;
 }
+interface DwsOperationResponse { success?: boolean; ok?: boolean; error?: unknown; }
 
 export const dwsPath = process.env.DWS_CLI_PATH?.trim() || "dws";
 
@@ -142,9 +146,9 @@ export async function searchMonitorCommands(senderId: string, from: Date): Promi
 }
 
 export async function searchBots(query: string): Promise<BotMatch[]> {
-  const result = await runDwsJson<DwsBotSearchResponse>(["chat", "+bot-find", "--query", query]);
-  return (result.bots ?? []).flatMap((bot) => {
-    const openDingTalkId = bot.openDingTalkId?.trim();
+  const result = await runDwsJson<DwsBotSearchResponse>(["chat", "bot", "find", "--query", query]);
+  return ((result.bots ?? result.result?.bots) ?? []).flatMap((bot) => {
+    const openDingTalkId = (bot.openDingTalkId || bot.botOpenDingTalkId)?.trim();
     const name = bot.name?.trim();
     return openDingTalkId && name ? [{ openDingTalkId, name }] : [];
   });
@@ -168,6 +172,17 @@ export async function searchUsers(query: string): Promise<UserMatch[]> {
     const senderName = (user.name || user.nick)?.trim();
     return senderId && senderName ? [{ senderId, senderName, department: user.department }] : [];
   });
+}
+
+export async function addBotToGroup(groupId: string, robotCode: string): Promise<void> {
+  try {
+    const result = await runDwsJson<DwsOperationResponse>([
+      "chat", "+chat-add-bot", "--robot-code", robotCode, "--id", groupId, "--yes",
+    ]);
+    if (result.success === false || result.ok === false) throw new Error(`配置机器人加入群失败：${JSON.stringify(result.error ?? result)}`);
+  } catch (err) {
+    throw new Error(`配置机器人加入群失败：${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 export async function listGroupBots(groupId: string): Promise<Array<{ openBotId: string; name: string }>> {

@@ -24,6 +24,7 @@ async function getAccessToken(clientId: string, clientSecret: string): Promise<s
 export async function sendRobotGroupText(
   groupId: string,
   content: string,
+  robotCode: string,
   clientId: string,
   clientSecret: string,
 ): Promise<void> {
@@ -35,9 +36,8 @@ export async function sendRobotGroupText(
       "x-acs-dingtalk-access-token": token,
     },
     body: JSON.stringify({
-      // For an enterprise internal application robot, robotCode is the
-      // application's Client ID (AppKey).
-      robotCode: clientId,
+      // The OpenAPI send endpoint expects the application's Client ID here.
+      robotCode,
       openConversationId: groupId,
       msgKey: "sampleText",
       msgParam: JSON.stringify({ content }),
