@@ -582,7 +582,7 @@ export async function runApp(
     state.busy = true;
     state.paused = false;
     state.activeAgent = selectedAgent;
-    const label = agentLabel(selectedAgent);
+    const label = `${agentLabel(selectedAgent)} Agent`;
     const taskStartedAt = Date.now();
     const formatElapsed = () => {
       const totalSeconds = Math.max(0, Math.floor((Date.now() - taskStartedAt) / 1000));
@@ -661,8 +661,8 @@ export async function runApp(
         clearTimeout(pendingUpdate);
       }
       state.sessions[agent] = result.sessionId ?? state.sessions[agent];
-      const stats = formatStats(result.toolStats);
-      const note = [`Agent ${label}`, `耗时 ${(result.durationMs / 1000).toFixed(1)}s`, stats].filter(Boolean).join(" | ");
+      const toolCount = Object.values(result.toolStats).reduce((total, count) => total + count, 0);
+      const note = `处理详情 · 1 条消息 · ${toolCount} 次工具调用`;
       await bot.updateReply(reply, `✅ ${title}完成 总耗时 ${formatElapsed()}`, buildCardContent(result.text, note));
       await appendConversationLog({
         id: `${message.conversationId}:${taskStartedAt}`,
