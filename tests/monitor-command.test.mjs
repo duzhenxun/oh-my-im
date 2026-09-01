@@ -10,6 +10,7 @@ const AUTHORIZED_USER = "authorized-user";
 const config = {
   targets: [{ groupId: "group-a", groupName: "已有群", senderId: "other", senderName: "其他人" }],
   botAllowedUserIds: [AUTHORIZED_USER],
+  botSuperAdminUserIds: [],
   replyFormat: "markdown",
   robotName: "映客活动AI",
   clientId: "client",

@@ -1,10 +1,75 @@
 import { spawn } from "node:child_process";
-import type { AgentCallbacks, AgentResult } from "./index.js";
+import { open, readdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { AgentCallbacks, AgentResult, AgentSessionInfo } from "./index.js";
 import type { Config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { asObject, attachJsonlReader, createAgentEnv, type JsonObject } from "./process-utils.js";
 
 const log = createLogger("Pi");
+
+async function findJsonlFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  const visit = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    await Promise.all(entries.map(async (entry) => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(path);
+    }));
+  };
+  await visit(root);
+  return files;
+}
+
+async function readPrefix(path: string, size = 128 * 1024): Promise<string> {
+  const file = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(size);
+    const { bytesRead } = await file.read(buffer, 0, size, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await file.close();
+  }
+}
+
+export async function listPiSessions(_config: Config): Promise<AgentSessionInfo[]> {
+  const root = process.env.PI_CODING_AGENT_SESSION_DIR?.trim() || join(homedir(), ".pi", "agent", "sessions");
+  const files = await findJsonlFiles(root);
+  const sessions = await Promise.all(files.map(async (path): Promise<AgentSessionInfo | undefined> => {
+    try {
+      const lines = (await readPrefix(path)).split(/\r?\n/).filter(Boolean);
+      const header = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+      if (header.type !== "session" || typeof header.id !== "string") return undefined;
+      let title: string | undefined;
+      let summary: string | undefined;
+      for (const line of lines.slice(1)) {
+        const event = JSON.parse(line) as Record<string, unknown>;
+        const message = asObject(event.message);
+        if (event.type !== "message" || !Array.isArray(message?.content)) continue;
+        const text = message.content.flatMap((part) => {
+          const item = asObject(part);
+          return item?.type === "text" && typeof item.text === "string" ? [item.text] : [];
+        }).join(" ").replace(/\s+/g, " ").trim().slice(0, 120) || undefined;
+        if (message.role === "user" && !title) title = text;
+        if (message.role === "assistant" && text) summary = text;
+      }
+      return {
+        id: header.id,
+        title,
+        summary,
+        createdAt: typeof header.timestamp === "string" ? header.timestamp : undefined,
+        updatedAt: typeof header.timestamp === "string" ? header.timestamp : undefined,
+        cwd: typeof header.cwd === "string" ? header.cwd : undefined,
+      };
+    } catch {
+      return undefined;
+    }
+  }));
+  return sessions.filter((item): item is AgentSessionInfo => Boolean(item))
+    .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+}
 
 function extractAssistantText(message: unknown): string | undefined {
   const value = asObject(message);

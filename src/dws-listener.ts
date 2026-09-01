@@ -24,6 +24,7 @@ import {
   searchMonitorCommands,
   searchGroups,
   searchUsers,
+  searchBots,
   sendRobotText,
   startGroupEventStream,
   type DwsMessageEvent,
@@ -208,6 +209,13 @@ function normalizeDashboardConfig(parsed: DashboardConfig): DashboardConfig {
     botAllowedUserNames: parsed.botAllowedUserNames && typeof parsed.botAllowedUserNames === "object"
       ? parsed.botAllowedUserNames
       : Object.fromEntries(targets.map((target) => [target.senderId, target.senderName])),
+    botSuperAdminUserIds: Array.isArray(parsed.botSuperAdminUserIds)
+      ? [...new Set(parsed.botSuperAdminUserIds.map((id) => id.trim()).filter(Boolean))]
+      : [],
+    botSuperAdminUserNames: parsed.botSuperAdminUserNames && typeof parsed.botSuperAdminUserNames === "object"
+      ? parsed.botSuperAdminUserNames
+      : {},
+    robotSenderOpenDingTalkId: parsed.robotSenderOpenDingTalkId?.trim() || "",
     agent: parsed.agent === "pi" ? "pi" : "codex",
     commandKeywords: parsed.commandKeywords && typeof parsed.commandKeywords === "object"
       ? parsed.commandKeywords
@@ -246,6 +254,9 @@ function mergeDashboardConfigs(primary: DashboardConfig, legacy: DashboardConfig
     targets,
     botAllowedUserIds: [...new Set([...primary.botAllowedUserIds, ...legacy.botAllowedUserIds])],
     botAllowedUserNames: { ...legacy.botAllowedUserNames, ...primary.botAllowedUserNames },
+    botSuperAdminUserIds: [...new Set([...primary.botSuperAdminUserIds, ...legacy.botSuperAdminUserIds])],
+    botSuperAdminUserNames: { ...legacy.botSuperAdminUserNames, ...primary.botSuperAdminUserNames },
+    robotSenderOpenDingTalkId: primary.robotSenderOpenDingTalkId || legacy.robotSenderOpenDingTalkId,
     clientId: primary.clientId || legacy.clientId,
     clientSecret: primary.clientSecret || legacy.clientSecret,
     robotCode: primary.robotCode || legacy.robotCode,
@@ -278,6 +289,9 @@ async function loadDashboardConfig(): Promise<DashboardConfig> {
     targets,
     botAllowedUserIds: defaultBotAllowedUserIds(targets),
     botAllowedUserNames: Object.fromEntries(targets.map((target) => [target.senderId, target.senderName])),
+    botSuperAdminUserIds: [],
+    botSuperAdminUserNames: {},
+    robotSenderOpenDingTalkId: "",
     replyFormat: "markdown",
     agent: "codex",
     commandKeywords: structuredClone(EMPTY_COMMAND_KEYWORDS),
@@ -818,6 +832,11 @@ async function enqueueGroupEvent(
       }
       void sendRobotText(groupId, getDashboardConfig().robotCode, "当前 Pi 任务暂时无法接收引导，消息已排队等待处理。")
         .catch((err) => log.warn(`queue acknowledgement failed: ${String(err)}`));
+    } else if (queue.activeAgent === "codex" && content) {
+      // Codex exec is a one-turn process; keep follow-up messages in the local
+      // per-group queue and process them with exec resume after the turn ends.
+      void sendRobotText(groupId, getDashboardConfig().robotCode, "当前 Codex 正在处理，消息已排队等待处理。")
+        .catch((err) => log.warn(`queue acknowledgement failed: ${String(err)}`));
     }
     queue.pending.push(event);
     log.info(`queued message=${event.message_id || "unknown"} pending=${queue.pending.length}`);
@@ -1112,6 +1131,7 @@ async function main(): Promise<void> {
     searchGroups,
     listGroupMembers,
     searchUsers,
+    searchBots,
   }, { host: dashboardServerConfig.host });
   log.info(`dashboard started at http://${dashboardServerConfig.host}:${dashboardServerConfig.port}`);
   log.info(`monitoring ${configuredGroupIds(dashboardConfig).length} group(s) with ${dashboardConfig.targets.length} rule(s)`);

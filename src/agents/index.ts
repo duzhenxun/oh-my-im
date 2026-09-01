@@ -1,13 +1,22 @@
 import type { AgentType, Config } from "../config.js";
 export type { AgentType } from "../config.js";
-import { runCodex } from "./codex-agent.js";
-import { runPi } from "./pi-agent.js";
+import { listCodexSessions, runCodex } from "./codex-agent.js";
+import { listPiSessions, runPi } from "./pi-agent.js";
 
 export interface AgentResult {
   sessionId?: string;
   text: string;
   toolStats: Record<string, number>;
   durationMs: number;
+}
+
+export interface AgentSessionInfo {
+  id: string;
+  title?: string;
+  summary?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  cwd?: string;
 }
 
 export interface AgentCallbacks {
@@ -30,6 +39,12 @@ export function agentSwitchMessage(agent: AgentType): string {
     `当前已切换到 ${label}。\n`,
     "使用方法：直接发送问题或任务即可；发送已配置的暂停指令可暂停当前任务，发送 Agent 切换指令可再次切换。",
   ].join("\n");
+}
+
+export function listAgentSessions(agent: AgentType, config: Config): Promise<AgentSessionInfo[]> {
+  return agent === "pi"
+    ? listPiSessions(config)
+    : listCodexSessions(config);
 }
 
 export function runAgent(

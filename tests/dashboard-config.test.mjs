@@ -7,6 +7,8 @@ test("dashboard accepts an empty target list after the final group is stopped", 
     targets: [{ groupId: "group", groupName: "群", senderId: "user", senderName: "人员" }],
     botAllowedUserIds: ["user"],
     botAllowedUserNames: { user: "人员" },
+    botSuperAdminUserIds: ["user"],
+    botSuperAdminUserNames: { user: "人员" },
     replyFormat: "markdown",
     robotName: "机器人",
     clientId: "client",
@@ -42,4 +44,6 @@ test("dashboard accepts an empty target list after the final group is stopped", 
   assert.deepEqual(config.targets, []);
   assert.equal(config.clientSecret, "secret");
   assert.deepEqual(config.botAllowedUserNames, { user: "人员" });
+  assert.deepEqual(config.botSuperAdminUserIds, ["user"]);
+  assert.deepEqual(config.botSuperAdminUserNames, { user: "人员" });
 });

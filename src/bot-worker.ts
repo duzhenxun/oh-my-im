@@ -15,6 +15,7 @@ interface DashboardCredentials {
   clientId?: string;
   clientSecret?: string;
   botAllowedUserIds?: string[];
+  botSuperAdminUserIds?: string[];
   targets?: Array<{ senderId?: string }>;
   agent?: "codex" | "pi";
   botAllowedUserNames?: Record<string, string>;
@@ -102,14 +103,13 @@ try {
         return undefined;
       }
     },
-    setAgent: async (agent) => {
-      const current = JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials;
-      current.agent = agent;
-      const temporary = `${dashboardConfigFile}.${process.pid}.tmp`;
-      await import("node:fs/promises").then(async ({ rename, writeFile }) => {
-        await writeFile(temporary, `${JSON.stringify(current, null, 2)}\n`, "utf8");
-        await rename(temporary, dashboardConfigFile);
-      });
+    getSuperAdminUserIds: () => {
+      try {
+        const current = JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials;
+        return [...new Set((current.botSuperAdminUserIds ?? []).map((id) => id.trim()).filter(Boolean))];
+      } catch {
+        return [];
+      }
     },
     getAllowedUserIds: () => {
       try {

@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { GroupMatch, GroupMember, UserMatch } from "./dws-dashboard.js";
+import type { BotMatch, GroupMatch, GroupMember, UserMatch } from "./dws-dashboard.js";
 
 export interface DwsMessageEvent {
   [key: string]: unknown;
@@ -35,6 +35,7 @@ interface DwsMessageListResponse {
 interface DwsChatSearchResponse { chats?: Array<{ openConversationId?: string; name?: string; title?: string; memberCount?: number }>; }
 interface DwsConversationListResponse { conversations?: Array<{ openConversationId?: string; conversationName?: string }>; }
 interface DwsMessageSendResult { failedCount?: number; success?: boolean; }
+interface DwsBotSearchResponse { bots?: Array<{ openDingTalkId?: string; name?: string }>; }
 interface DwsUserSearchResponse {
   users?: Array<{ openDingtalkId?: string; openDingTalkId?: string; userId?: string; name?: string; nick?: string; department?: string }>;
   items?: Array<{ openDingtalkId?: string; openDingTalkId?: string; userId?: string; name?: string; nick?: string; department?: string }>;
@@ -99,6 +100,15 @@ export async function sendRobotText(groupId: string, robotCode: string, content:
     "--groups", groupId, "--text", content, "--yes",
   ]);
   if (result.success === false || (result.failedCount ?? 0) > 0) throw new Error("机器人普通消息发送失败");
+}
+
+export async function searchBots(query: string): Promise<BotMatch[]> {
+  const result = await runDwsJson<DwsBotSearchResponse>(["chat", "+bot-find", "--query", query]);
+  return (result.bots ?? []).flatMap((bot) => {
+    const openDingTalkId = bot.openDingTalkId?.trim();
+    const name = bot.name?.trim();
+    return openDingTalkId && name ? [{ openDingTalkId, name }] : [];
+  });
 }
 
 export async function searchGroups(query: string): Promise<GroupMatch[]> {

@@ -349,13 +349,13 @@ export class DingTalkBot {
     }
   }
 
-  async downloadAttachments(message: DingTalkTextMessage): Promise<DownloadedAttachment[]> {
+  async downloadAttachments(message: DingTalkTextMessage, workDir = this.config.codexWorkDir): Promise<DownloadedAttachment[]> {
     if (message.attachments.length === 0) return [];
     if (!message.robotCode) {
       throw new Error("DingTalk media download requires robotCode, but this message did not include it");
     }
 
-    const dir = resolve(this.config.codexWorkDir, ".oh-my-im", "media");
+    const dir = resolve(workDir, ".oh-my-im", "media");
     await mkdir(dir, { recursive: true });
 
     const downloaded: DownloadedAttachment[] = [];

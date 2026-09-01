@@ -45,6 +45,7 @@ function printHelp(): void {
     "  omi listen     Alias for omi start",
     "  omi --no-listen  Start only the one-to-one bot; do not listen to groups",
     "  omi stop       Stop the current omi mode",
+    "  omi restart    Stop and start the current omi mode",
     "  omi status     Show mode, process state, dashboard address, and log path",
     "  omi update     Restart the current mode with the current built version",
     "  omi -h         Show this help",
@@ -185,6 +186,11 @@ if (args.includes("-h") || args.includes("--help") || command === "help") {
   await stop();
 } else if (command === "status") {
   status();
+} else if (command === "restart") {
+  const current = readState();
+  const mode = current?.mode ?? "listen";
+  await stop();
+  start(mode, current?.workspace || launchWorkspace);
 } else if (command === "update") {
   const current = readState();
   const mode = current?.mode ?? "listen";
