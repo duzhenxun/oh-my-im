@@ -31,10 +31,7 @@ export function agentLabel(agent: AgentType): string {
 }
 
 export function agentSwitchMessage(agent: AgentType): string {
-  const label = agentLabel(agent);
-  const source = agent === "pi"
-    ? "Pi Agent（使用本机 Pi CLI）"
-    : "Codex Agent（使用本机 Codex CLI）";
+  const label = `${agentLabel(agent)} Agent`;
   return [
     `当前已切换到 ${label}。\n`,
     "使用方法：直接发送问题或任务即可；发送已配置的暂停指令可暂停当前任务，发送 Agent 切换指令可再次切换。",

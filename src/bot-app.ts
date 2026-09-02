@@ -488,13 +488,40 @@ export async function runApp(
     getAllowedUserIds?: () => string[];
     getCommandKeywords?: () => CommandKeywordsConfig | undefined;
     getSuperAdminUserIds?: () => string[];
+    getPrivateChatEnabled?: () => boolean;
+    getCardUpdateIntervalMs?: () => number;
+    getShowElapsed?: () => boolean;
+    onConnectionStatus?: (connected: boolean) => void;
   } = {},
 ): Promise<void> {
   const config = configOverride ?? loadConfig();
   const bot = new DingTalkBot(config);
   const conversations = new Map<string, ConversationState>();
+  // Stream callbacks may be redelivered when the first callback is still
+  // running (we only ACK after onMessage completes). Without message-level
+  // deduplication, one user message can enter the busy branch again and emit
+  // the misleading "后续消息" acknowledgement even though the user sent it
+  // only once.
+  const handledCallbackIds = new Set<string>();
+  const handledCallbackIdLimit = 2_000;
 
   async function handleMessage(message: DingTalkTextMessage): Promise<void> {
+    if (options.getPrivateChatEnabled?.() === false) {
+      log.info(`ignored private message while private chat is disabled conversation=${message.conversationId}`);
+      return;
+    }
+    if (message.callbackId?.trim()) {
+      const callbackId = message.callbackId.trim();
+      if (handledCallbackIds.has(callbackId)) {
+        log.warn(`ignored duplicate DingTalk callback callbackId=${callbackId} conversation=${message.conversationId} text=${JSON.stringify(message.text.slice(0, 120))}`);
+        return;
+      }
+      handledCallbackIds.add(callbackId);
+      if (handledCallbackIds.size > handledCallbackIdLimit) {
+        handledCallbackIds.delete(handledCallbackIds.values().next().value as string);
+      }
+    }
+
     log.info(
       `received message conversation=${message.conversationId} conversationType=${message.conversationType ?? "<none>"} msgtype=${message.msgtype} senderNick=${message.senderNick ?? "<none>"} senderId=${message.senderId} senderStaffId=${message.senderStaffId ?? "<none>"} text=${JSON.stringify(message.text.slice(0, 500))} textLen=${message.text.length} attachmentCount=${message.attachments.length}`,
     );
@@ -582,7 +609,7 @@ export async function runApp(
     state.busy = true;
     state.paused = false;
     state.activeAgent = selectedAgent;
-    const label = agentLabel(selectedAgent);
+    const label = `${agentLabel(selectedAgent)} Agent`;
     const taskStartedAt = Date.now();
     const formatElapsed = () => {
       const totalSeconds = Math.max(0, Math.floor((Date.now() - taskStartedAt) / 1000));
@@ -591,7 +618,8 @@ export async function runApp(
       return minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
     };
     const title = `【${label}】`;
-    const processingTitle = () => `🔵 ${title}处理中... (${formatElapsed()})`;
+    const processingTitle = () => options.getShowElapsed?.() === false ? `🔵 ${title}处理中...` : `🔵 ${title}处理中... (${formatElapsed()})`;
+    const finishedTitle = (icon: string, state: string) => options.getShowElapsed?.() === false ? `${icon} ${title}${state}` : `${icon} ${title}${state} 总耗时 ${formatElapsed()}`;
     const reply = await bot.sendThinkingCard(message, `${label} 正在处理...`, processingTitle());
     let elapsedTimer: ReturnType<typeof setInterval> | undefined;
     let latestCardContent = `${label} 正在处理...`;
@@ -601,7 +629,7 @@ export async function runApp(
     try {
       let latestStats: Record<string, number> = {};
       let lastUpdateAt = 0;
-      const cardUpdateInterval = selectedAgent === "pi" ? 1_000 : 500;
+      const cardUpdateInterval = Math.max(500, options.getCardUpdateIntervalMs?.() ?? 3_000);
       let pendingUpdate: ReturnType<typeof setTimeout> | undefined;
 
       const updateCard = (title: string, content: string, force = false) => {
@@ -661,9 +689,9 @@ export async function runApp(
         clearTimeout(pendingUpdate);
       }
       state.sessions[agent] = result.sessionId ?? state.sessions[agent];
-      const stats = formatStats(result.toolStats);
-      const note = [`Agent ${label}`, `耗时 ${(result.durationMs / 1000).toFixed(1)}s`, stats].filter(Boolean).join(" | ");
-      await bot.updateReply(reply, `✅ ${title}完成 总耗时 ${formatElapsed()}`, buildCardContent(result.text, note));
+      const toolCount = Object.values(result.toolStats).reduce((total, count) => total + count, 0);
+      const note = `处理详情 · 1 条消息 · ${toolCount} 次工具调用`;
+      await bot.updateReply(reply, finishedTitle("✅", "完成"), buildCardContent(result.text, note));
       await appendConversationLog({
         id: `${message.conversationId}:${taskStartedAt}`,
         createdAt: new Date().toISOString(),
@@ -686,7 +714,7 @@ export async function runApp(
       }
       if (state.paused) {
         log.info(`${label} task paused by user`);
-        await bot.updateReply(reply, `🔴 ${title}处理暂停 总耗时 ${formatElapsed()}`, latestCardContent);
+        await bot.updateReply(reply, finishedTitle("🔴", "处理暂停"), latestCardContent);
         await appendConversationLog({
           id: `${message.conversationId}:${taskStartedAt}`,
           createdAt: new Date().toISOString(), conversationType: "personal",
@@ -699,7 +727,7 @@ export async function runApp(
       } else {
         log.error(`${label} execution failed`, err);
         const errorMessage = err instanceof Error ? err.message : String(err);
-        await bot.updateReply(reply, `❌ ${title}处理失败 总耗时 ${formatElapsed()}`, `${label} 执行失败：${errorMessage}`);
+        await bot.updateReply(reply, finishedTitle("❌", "处理失败"), `${label} 执行失败：${errorMessage}`);
         await appendConversationLog({
           id: `${message.conversationId}:${taskStartedAt}`,
           createdAt: new Date().toISOString(),
@@ -750,6 +778,53 @@ export async function runApp(
     process.exit(0);
   });
 
-  await bot.start(handleMessage);
+  let privateChatConnected = false;
+  let privateChatStarting = false;
+  let privateChatGeneration = 0;
+  const privateChatTimer = setInterval(() => {
+    const enabled = options.getPrivateChatEnabled?.() ?? true;
+    if (!enabled) {
+      privateChatGeneration += 1;
+      if (privateChatConnected || privateChatStarting) {
+        privateChatConnected = false;
+        privateChatStarting = false;
+        bot.stop();
+        options.onConnectionStatus?.(false);
+        log.info("private chat stream stopped by configuration");
+      }
+      return;
+    }
+    if (privateChatConnected || privateChatStarting) return;
+    privateChatStarting = true;
+    const generation = privateChatGeneration;
+    log.info("private chat stream starting by configuration");
+    void bot.start(handleMessage).then(() => {
+      if (generation !== privateChatGeneration || options.getPrivateChatEnabled?.() === false) {
+        bot.stop();
+        return;
+      }
+      privateChatStarting = false;
+      privateChatConnected = true;
+      options.onConnectionStatus?.(true);
+      log.info("private chat stream started by configuration");
+    }).catch((err) => {
+      privateChatStarting = false;
+      privateChatConnected = false;
+      options.onConnectionStatus?.(false);
+      log.error("private chat stream restart failed", err);
+    });
+  }, 1_000);
+  // Keep the worker alive while private chat is disabled so a later dashboard
+  // toggle can start the Stream connection without requiring a process restart.
+  if (options.getPrivateChatEnabled?.() === false) {
+    privateChatConnected = false;
+    log.info("private chat stream disabled by configuration");
+  } else {
+    privateChatStarting = true;
+    await bot.start(handleMessage);
+    privateChatStarting = false;
+    privateChatConnected = true;
+    options.onConnectionStatus?.(true);
+  }
   log.info(`ready workDir=${config.codexWorkDir} codex=${config.codexCliPath}`);
 }

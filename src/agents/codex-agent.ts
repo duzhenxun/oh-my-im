@@ -99,6 +99,17 @@ function parseJsonLine(line: string): Record<string, unknown> | null {
   }
 }
 
+function toolName(item: Record<string, unknown>): string | undefined {
+  const itemType = item.type;
+  if (itemType === "function_call" || itemType === "custom_tool_call" || itemType === "mcp_tool_call") {
+    return typeof item.name === "string" && item.name.trim() ? item.name.trim() : String(itemType);
+  }
+  if (itemType === "command_execution") return "shell";
+  if (itemType === "web_search" || itemType === "web_search_call") return "web_search";
+  if (itemType === "file_change" || itemType === "file_change_call") return "file_change";
+  return undefined;
+}
+
 function extractText(item: Record<string, unknown>): string | undefined {
   const itemType = item.type;
   if (itemType === "agent_message") {
@@ -189,9 +200,13 @@ export function runCodex(
 
     let completed = false;
     let nextSessionId = sessionId;
-    let accumulated = "";
+    // Codex may emit several assistant messages during one turn (for example,
+    // commentary before/after tool calls). Keep only the newest model message;
+    // concatenating every item makes the completed card repeat old content.
+    let latestMessage = "";
     let stderr = "";
     const toolStats: Record<string, number> = {};
+    const countedToolCalls = new Set<string>();
     const timeout = setTimeout(() => {
       if (completed) return;
       completed = true;
@@ -257,32 +272,42 @@ export function runCodex(
 
       if (event.type === "response_item" || type === "item.started" || type === "item.updated" || type === "item.completed") {
         const item = (payload.item as Record<string, unknown> | undefined) ?? payload;
-        const itemType = item.type;
-        if (itemType === "function_call" || itemType === "custom_tool_call") {
-          const name = typeof item.name === "string" ? item.name : "tool";
-          toolStats[name] = (toolStats[name] ?? 0) + 1;
-          log.debug(`tool=${name}`);
-          callbacks.onToolUse?.(name, { ...toolStats });
+        const name = toolName(item);
+        if (name) {
+          const id = [item.id, item.call_id, item.callId]
+            .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+          // Current Codex emits command_execution at both item.started and
+          // item.completed. Count its stable item ID once. Older response_item
+          // formats generally emit one function/custom tool call event.
+          const key = id?.trim() || (type === "item.completed" ? undefined : `${type}:${name}:${JSON.stringify(item)}`);
+          if (key && !countedToolCalls.has(key)) {
+            countedToolCalls.add(key);
+            toolStats[name] = (toolStats[name] ?? 0) + 1;
+            log.debug(`tool=${name}`);
+            callbacks.onToolUse?.(name, { ...toolStats });
+          }
           return;
         }
 
         const text = extractText(item);
         if (text) {
-          accumulated += (accumulated ? "\n\n" : "") + text;
-          callbacks.onText?.(accumulated);
+          latestMessage = text;
+          callbacks.onText?.(latestMessage);
         }
         return;
       }
 
       if (type === "task_complete" || type === "turn.completed") {
         const last = payload.last_agent_message;
-        if (!accumulated && typeof last === "string") accumulated = last;
+        // This field is Codex's authoritative final response. Prefer it even
+        // when earlier agent_message items have already been streamed.
+        if (typeof last === "string" && last.trim()) latestMessage = last;
         completed = true;
         clearTimeout(timeout);
         log.info(`completed in ${Date.now() - start}ms`);
         resolve({
           sessionId: nextSessionId,
-          text: accumulated.trim() || "(无输出)",
+          text: latestMessage.trim() || "(无输出)",
           toolStats,
           durationMs: Date.now() - start,
         });
@@ -309,7 +334,7 @@ export function runCodex(
       log.info(`closed cleanly in ${Date.now() - start}ms`);
       resolve({
         sessionId: nextSessionId,
-        text: accumulated.trim() || "(无输出)",
+        text: latestMessage.trim() || "(无输出)",
         toolStats,
         durationMs: Date.now() - start,
       });
