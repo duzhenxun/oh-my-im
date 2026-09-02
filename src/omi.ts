@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -34,6 +35,57 @@ const logFile = join(stateDir, "omi.log");
 const here = dirname(fileURLToPath(import.meta.url));
 const listenerPath = join(here, "dws-listener.js");
 const botPath = join(here, "bot-worker.js");
+const packageFile = join(here, "..", "package.json");
+const packageName = "oh-my-im";
+const repositoryUrl = "https://github.com/duzhenxun/oh-my-im";
+
+function localVersion(): string {
+  try {
+    const packageJson = JSON.parse(readFileSync(packageFile, "utf8")) as { version?: string };
+    return packageJson.version?.trim() || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+function compareVersions(left: string, right: string): number {
+  const parse = (value: string) => value.replace(/^v/i, "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const a = parse(left); const b = parse(right);
+  for (let index = 0; index < 3; index += 1) if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) - (b[index] ?? 0);
+  return 0;
+}
+
+async function checkForUpdate(): Promise<void> {
+  const current = localVersion();
+  try {
+    const response = await fetch(`https://registry.npmjs.org/${packageName}/latest`, { signal: AbortSignal.timeout(3_000) });
+    if (!response.ok) return;
+    const latest = (await response.json() as { version?: string }).version?.trim();
+    if (!latest || compareVersions(latest, current) <= 0) return;
+    console.log(`发现 ${packageName} 新版本：v${latest}（当前 v${current}）`);
+    console.log(`GitHub：${repositoryUrl}`);
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      console.log(`如需升级，请执行：npm install -g ${packageName}@latest`);
+      return;
+    }
+    const readline = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = (await readline.question("是否立即升级？[y/N] ")).trim().toLowerCase();
+      if (answer !== "y" && answer !== "yes") return;
+    } finally {
+      readline.close();
+    }
+    console.log(`正在升级 ${packageName}...`);
+    const result = spawnSync("npm", ["install", "-g", `${packageName}@latest`], { stdio: "inherit" });
+    if (result.status !== 0) {
+      console.error("升级失败，请稍后手动执行：", `npm install -g ${packageName}@latest`);
+      return;
+    }
+    console.log(`升级完成，请重新执行：${process.argv.slice(2).join(" ") || "omi"}`);
+  } catch {
+    // Version checking must never prevent the already installed version from starting.
+  }
+}
 
 function printHelp(): void {
   console.log([
@@ -181,17 +233,20 @@ function status(): void {
 if (args.includes("-h") || args.includes("--help") || command === "help") {
   printHelp();
 } else if (command === "start" || command === "listen") {
+  await checkForUpdate();
   start(noListen ? "bot" : "listen");
 } else if (command === "stop") {
   await stop();
 } else if (command === "status") {
   status();
 } else if (command === "restart") {
+  await checkForUpdate();
   const current = readState();
   const mode = current?.mode ?? "listen";
   await stop();
   start(mode, current?.workspace || launchWorkspace);
 } else if (command === "update") {
+  await checkForUpdate();
   const current = readState();
   const mode = current?.mode ?? "listen";
   await stop();
