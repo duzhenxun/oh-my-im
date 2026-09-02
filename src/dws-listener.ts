@@ -18,7 +18,6 @@ import {
 } from "./dws-dashboard.js";
 import {
   dwsPath,
-  listGroupMessages,
   listConversations,
   getCurrentDwsUser,
   getDwsAuthStatus,
@@ -47,6 +46,12 @@ async function sendDwsFallbackText(groupId: string, content: string): Promise<vo
   if (result.success === false || (result.failedCount ?? 0) > 0) throw new Error("DWS 失败原因通知发送失败");
 }
 
+function notifyGroupFailure(groupId: string, context: string, err: unknown): void {
+  const reason = err instanceof Error ? err.message : String(err);
+  void sendDwsFallbackText(groupId, `AI 处理失败：${context}\n失败原因：${reason.slice(0, 1_500)}`)
+    .catch((notifyErr) => log.error(`DWS failure notification failed group=${groupId}: ${String(notifyErr)}`));
+}
+
 async function sendRobotText(groupId: string, config: DashboardConfig, content: string): Promise<void> {
   log.info(`robot API send group=${groupId} robotCode=${config.clientId} robotName=${config.robotName}`);
   return sendRobotGroupText(groupId, content, config.clientId, config.clientId, config.clientSecret);
@@ -70,10 +75,8 @@ const DEFAULT_ROBOT_NAME = "AI Agent";
 const EMPTY_COMMAND_KEYWORDS: DashboardConfig["commandKeywords"] = {
   pause: [], monitorOpen: [], monitorStop: [], switchPi: [], switchCodex: [],
 };
-const cardUpdateIntervalMs = 500;
-const historyPollIntervalMs = 2_000;
-const historyLookbackMs = 20_000;
-const mentionPollIntervalMs = 5_000;
+import { startDwsHistoryPolling } from "./dws-history.js";
+
 
 interface CardState {
   cards: Record<string, PersistedCard>;
@@ -275,6 +278,11 @@ function normalizeDashboardConfig(parsed: DashboardConfig): DashboardConfig {
   return {
     ...parsed,
     privateChatEnabled: parsed.privateChatEnabled !== false,
+    cardUpdateIntervalMs: Number.isFinite(parsed.cardUpdateIntervalMs) ? Math.max(500, Math.min(60_000, parsed.cardUpdateIntervalMs)) : 3_000,
+    showElapsed: parsed.showElapsed !== false,
+    historyGroupLimit: Number.isInteger(parsed.historyGroupLimit) ? Math.max(1, Math.min(500, parsed.historyGroupLimit)) : 10,
+    historyMessageLimit: Number.isInteger(parsed.historyMessageLimit) ? Math.max(1, Math.min(500, parsed.historyMessageLimit)) : 20,
+    historyPollIntervalSeconds: Number.isFinite(parsed.historyPollIntervalSeconds) ? Math.max(0, Math.min(3600, parsed.historyPollIntervalSeconds)) : 5,
     targets,
     botAllowedUserIds: Array.isArray(parsed.botAllowedUserIds) && parsed.botAllowedUserIds.length > 0
       ? [...new Set(parsed.botAllowedUserIds.map((id) => id.trim()).filter(Boolean))]
@@ -359,6 +367,11 @@ async function loadDashboardConfig(): Promise<DashboardConfig> {
   const targets = createDefaultTargets();
   return {
     privateChatEnabled: true,
+    cardUpdateIntervalMs: 3_000,
+    showElapsed: true,
+    historyGroupLimit: 10,
+    historyMessageLimit: 20,
+    historyPollIntervalSeconds: 5,
     targets,
     botAllowedUserIds: defaultBotAllowedUserIds(targets),
     botAllowedUserNames: Object.fromEntries(targets.map((target) => [target.senderId, target.senderName])),
@@ -600,11 +613,13 @@ function acceptsTarget(event: DwsMessageEvent, config: DashboardConfig): boolean
   return config.targets.some((target) => target.groupId === groupId && target.senderId === senderId);
 }
 
-function isCurrentDwsUser(event: DwsMessageEvent, currentUser: { userId?: string; openDingTalkId?: string; name?: string }): boolean {
-  const senderId = getSenderId(event).toLowerCase();
-  const senderName = senderDisplayName(event).toLowerCase();
-  const ids = [currentUser.userId, currentUser.openDingTalkId].filter((value): value is string => Boolean(value)).map((value) => value.toLowerCase());
-  return ids.includes(senderId) || Boolean(senderName && currentUser.name && senderName === currentUser.name.toLowerCase());
+function isCurrentDwsUser(event: DwsMessageEvent, currentUser: { name?: string }): boolean {
+  // Historical-message identity is defined by the DWS message `sender` name
+  // compared with `dws contact +me`'s `name`. Do not compare IDs here because
+  // the two APIs expose different identifier namespaces.
+  const senderName = senderDisplayName(event).trim();
+  const currentName = currentUser.name?.trim();
+  return Boolean(senderName && currentName && senderName === currentName);
 }
 
 function configuredGroupIds(config: DashboardConfig): string[] {
@@ -669,6 +684,11 @@ function getSenderId(event: DwsMessageEvent): string {
 
 function isIgnoredRobotEvent(event: DwsMessageEvent, config: DashboardConfig): boolean {
   const sender = event.sender ?? {};
+  const senderId = getSenderId(event).toLowerCase();
+  const messageAiSendFlag = typeof event.messageAiSendFlag === "string" ? event.messageAiSendFlag.trim().toUpperCase() : "";
+  if (messageAiSendFlag === "DWS") return true;
+  const configuredRobotId = config.robotSenderOpenDingTalkId?.trim().toLowerCase();
+  if (configuredRobotId && senderId === configuredRobotId) return true;
   const robotName = config.robotName.trim().toLowerCase();
   const senderValues = [sender.name, sender.nick, sender.displayName, sender.robotCode]
     .filter((value): value is string => typeof value === "string")
@@ -691,6 +711,7 @@ function isIgnoredRobotEvent(event: DwsMessageEvent, config: DashboardConfig): b
     });
   };
   const isRobot = robotMarker(sender) ||
+    (configuredRobotId && senderValues.includes(configuredRobotId)) ||
     (robotName && senderValues.some((value) => value.includes(robotName)));
   if (isRobot) return true;
 
@@ -766,7 +787,8 @@ async function handleBatch(
     const seconds = totalSeconds % 60;
     return minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
   };
-  const processingTitle = () => `🔵 ${title}处理中... (${formatElapsed()})`;
+  const processingTitle = () => getDashboardConfig().showElapsed ? `🔵 ${title}处理中... (${formatElapsed()})` : `🔵 ${title}处理中...`;
+  const finishedTitle = (icon: string, state: string) => getDashboardConfig().showElapsed ? `${icon} ${title}${state} 总耗时 ${formatElapsed()}` : `${icon} ${title}${state}`;
   try {
     const storedCard = cardState.cards[groupId];
     if (storedCard?.status === "processing") {
@@ -810,7 +832,7 @@ async function handleBatch(
     let cardUpdateInFlight: Promise<void> | undefined;
     // Pi emits very small deltas quickly. Coalesce them into one complete card
     // snapshot per second so DingTalk receives fresh content without a backlog.
-    const intervalMs = agent === "pi" ? 1_000 : cardUpdateIntervalMs;
+    const intervalMs = Math.max(500, getDashboardConfig().cardUpdateIntervalMs || 3_000);
     const pumpCardUpdate = () => {
       if (cardUpdateInFlight || !pendingCardUpdate) return;
       const remaining = intervalMs - (Date.now() - lastCardUpdateAt);
@@ -894,7 +916,7 @@ async function handleBatch(
       completedCardContent(result.text, events.length, result.toolStats),
       getDashboardConfig().replyFormat,
     );
-    await cardClient.update(activeCard, `✅ ${title}完成 总耗时 ${formatElapsed()}`, replyText);
+    await cardClient.update(activeCard, finishedTitle("✅", "完成"), replyText);
     liveReplies.delete(groupId);
     cardState.cards[groupId] = { cardBizId: activeCard.cardBizId, status: "completed" };
     await saveCardState(cardState);
@@ -915,6 +937,7 @@ async function handleBatch(
     });
     log.info(`replied batch size=${events.length}`);
   } catch (err) {
+    notifyGroupFailure(groupId, queue?.paused ? "任务已暂停" : "Agent 执行异常", err);
     if (elapsedTimer) {
       clearInterval(elapsedTimer);
       elapsedTimer = undefined;
@@ -925,7 +948,7 @@ async function handleBatch(
     if (card) {
       const stopped = queue?.paused === true;
       const stoppedContent = latestVisibleContent;
-      await cardClient.update(card, stopped ? `🔴 ${title}处理暂停 总耗时 ${formatElapsed()}` : `❌ ${title}处理失败 总耗时 ${formatElapsed()}`, stopped ? stoppedContent : `${label} 处理失败：${message.slice(0, 2_000)}`)
+      await cardClient.update(card, stopped ? finishedTitle("🔴", "处理暂停") : finishedTitle("❌", "处理失败"), stopped ? stoppedContent : `${label} 处理失败：${message.slice(0, 2_000)}`)
         .catch((updateErr) => log.warn(`card failure update skipped: ${String(updateErr)}`));
       cardState.cards[groupId] = { cardBizId: card.cardBizId, status: stopped ? "failed" : "failed" };
       await saveCardState(cardState);
@@ -1077,7 +1100,10 @@ function startGroupListener(
     }
     const rawContent = (event.content || event.text || "").trim();
     const mentionCommand = parseMentionMonitorCommand(rawContent, config.commandKeywords, mentionValues(event).length > 0);
-    const authorizedOperator = isBotAuthorizedOperator(event, config);
+    // The current DWS login account may not be in the one-to-one bot
+    // authorization list, but it is still allowed to manage binding rules:
+    // without @ it binds/unbinds itself; with @ it targets that member.
+    const authorizedOperator = isBotAuthorizedOperator(event, config) || isCurrentDwsUser(event, currentDwsUser);
     log.info(`command precheck group=${groupId} sender=${getSenderId(event)} senderName=${senderDisplayName(event) || "<none>"} content=${JSON.stringify(rawContent)} mentionCommand=${mentionCommand || "none"} authorized=${authorizedOperator} targets=${config.targets.filter((target) => target.groupId === groupId).length}`);
     if (mentionCommand && authorizedOperator) {
       const mentionKey = `${groupId}:mention:${getSenderId(event)}:${mentionCommand}:${rawContent.replace(/\s+/g, "").toLowerCase()}`;
@@ -1161,8 +1187,9 @@ function startGroupListener(
         }
         return;
       }
-      if ((command === "open" || command === "stop") && !isBotAuthorizedOperator(event, getDashboardConfig())) {
-        log.debug(`ignored monitor command from unauthorized bot operator=${getSenderId(event)}`);
+      if ((command === "open" || command === "stop") &&
+        !(isBotAuthorizedOperator(event, getDashboardConfig()) || isCurrentDwsUser(event, currentDwsUser))) {
+        log.debug(`ignored monitor command from unauthorized operator=${getSenderId(event)}`);
         return;
       }
       monitorCommandChain = monitorCommandChain
@@ -1175,7 +1202,10 @@ function startGroupListener(
               log.info(`open command needs bot installation group=${groupId} sender=${getSenderId(event)}`);
               const currentConfig = getDashboardConfig();
               if (!currentConfig.clientId.trim()) {
+                const reason = "未配置钉钉应用 Client ID，无法确定要加入群的机器人";
                 log.warn(`ignored monitor open because client ID is missing group=${groupId}`);
+                await sendDwsFallbackText(groupId, `AI 能力开启失败：${reason}。\n请先在 Web 的“机器人与权限”中配置 Client ID，或手动将“${currentConfig.robotName}”加入本群。`)
+                  .catch((notifyErr) => log.error(`DWS failure notification failed group=${groupId}: ${String(notifyErr)}`));
                 return;
               }
               const robotCode = currentConfig.clientId.trim();
@@ -1186,7 +1216,10 @@ function startGroupListener(
               } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
                 log.error(`configured bot add failed group=${groupId}: ${reason}`);
-                await sendDwsFallbackText(groupId, `AI 能力开启失败：配置机器人加入本群失败。\n失败原因：${reason}`)
+                const guidance = /permission|denied|权限|forbidden|unauthorized/i.test(reason)
+                  ? "当前 DWS 登录账号可能没有加机器人进群权限，请让群主/群管理员手动将配置机器人加入本群后，再重新发送打开指令。"
+                  : "请确认 Client ID 和机器人配置是否正确；如果自动加入失败，请让群主/群管理员手动将配置机器人加入本群后，再重新发送打开指令。";
+                await sendDwsFallbackText(groupId, `AI 能力开启失败：配置机器人加入本群失败。\n失败原因：${reason}\n${guidance}`)
                   .catch((notifyErr) => log.error(`DWS failure notification failed group=${groupId}: ${String(notifyErr)}`));
                 return;
               }
@@ -1203,7 +1236,7 @@ function startGroupListener(
           if (command === "stop") queues.get(groupId)?.pending.splice(0);
           await handleMonitorCommand(command, event, groupId, getDashboardConfig, updateDashboardConfig, hasRobot);
         })
-        .catch((err) => log.error(`monitor command failed: ${String(err)}`));
+        .catch((err) => { log.error(`monitor command failed: ${String(err)}`); notifyGroupFailure(groupId, "群控制指令执行异常", err); });
       return;
     }
     if (!acceptsTarget(event, config)) {
@@ -1211,7 +1244,7 @@ function startGroupListener(
       return;
     }
     void enqueueGroupEvent(event, groupId, queues, cardState, sessions, cardClient, getDashboardConfig, replies, liveReplies, runtime)
-      .catch((err) => log.error(String(err)));
+      .catch((err) => { log.error(String(err)); notifyGroupFailure(groupId, "群消息入队异常", err); });
   };
 
   rl.on("line", (line) => {
@@ -1222,67 +1255,12 @@ function startGroupListener(
     }
   });
 
-  // Keep the event stream for low-latency delivery, but also poll group history
-  // as a reliability fallback. DWS may omit messages sent by the currently
-  // authenticated user from the event stream, and a short overlap protects the
-  // gap between two history queries. eventKey() makes the two sources safe to
-  // combine without running the same message twice.
-  let historyPollInFlight = false;
-  const pollHistory = async () => {
-    if (historyPollInFlight) return;
-    historyPollInFlight = true;
-    try {
-      // Use a fixed short lookback instead of an ever-advancing cursor. If the
-      // history API is unavailable for a long time, recovery will still query
-      // only the recent window rather than replaying a large backlog.
-      const from = new Date(Date.now() - historyLookbackMs);
-      const groupIds = configuredGroupIds(getDashboardConfig());
-      for (const groupId of groupIds) {
-        const messages = await listGroupMessages(groupId, from);
-        messages.filter((event) => isCurrentDwsUser(event, currentDwsUser)).forEach((event) => acceptEvent(event));
-      }
-    } finally {
-      historyPollInFlight = false;
-    }
-  };
-  const historyPollTimer = setInterval(() => {
-    void pollHistory().catch((err) => log.warn(`history poll failed: ${String(err)}`));
-  }, historyPollIntervalMs);
-  historyPollTimer.unref();
-
-  // The DWS event stream may omit messages sent by the account used to log in.
-  // Poll recent messages from every known conversation as a second path so
-  // that this account can also use @person open/stop binding commands. Normal
-  // messages are still discarded by acceptEvent() unless they match a rule.
-  let mentionPollInFlight = false;
-  const pollMentionCommands = async () => {
-    if (mentionPollInFlight) return;
-    mentionPollInFlight = true;
-    try {
-      const conversations = await listConversations();
-      const groupIds = [...new Set(conversations
-        .map((conversation) => conversation.openConversationId?.trim())
-        .filter((id): id is string => Boolean(id)))];
-      const configuredIds = configuredGroupIds(getDashboardConfig());
-      for (const groupId of [...new Set([...configuredIds, ...groupIds])]) {
-        try {
-          const messages = await listGroupMessages(groupId, new Date(Date.now() - historyLookbackMs));
-          messages.filter((event) => isCurrentDwsUser(event, currentDwsUser)).forEach((event) => {
-            const content = (event.content || event.text || "").trim();
-            if (parseMentionMonitorCommand(content, getDashboardConfig().commandKeywords)) acceptEvent(event);
-          });
-        } catch (err) {
-          log.debug(`mention command poll skipped group=${groupId}: ${String(err)}`);
-        }
-      }
-    } finally {
-      mentionPollInFlight = false;
-    }
-  };
-  const mentionPollTimer = setInterval(() => {
-    void pollMentionCommands().catch((err) => log.warn(`mention command poll failed: ${String(err)}`));
-  }, mentionPollIntervalMs);
-  mentionPollTimer.unref();
+  // Historical-message compensation is implemented in src/dws-history.ts.
+  const stopHistoryPolling = startDwsHistoryPolling({
+    getConfig: getDashboardConfig,
+    configuredGroupIds,
+    acceptEvent: (event) => acceptEvent(event),
+  });
 
   return new Promise<void>((resolve, reject) => {
     listener.on("error", (err) => {
@@ -1292,8 +1270,7 @@ function startGroupListener(
     });
     listener.on("close", (code) => {
       runtime.eventConnected = false;
-      clearInterval(historyPollTimer);
-      clearInterval(mentionPollTimer);
+      stopHistoryPolling();
       const close = code === 0
         ? Promise.resolve()
         : Promise.reject(new Error(`dws event consume exited with code ${code}`));

@@ -78,10 +78,10 @@ function formatDwsTime(date: Date): string {
   return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())} ${part(date.getHours())}:${part(date.getMinutes())}:${part(date.getSeconds())}`;
 }
 
-export async function listGroupMessages(groupId: string, from: Date): Promise<DwsMessageEvent[]> {
+export async function listGroupMessages(groupId: string, from: Date, limit = 20): Promise<DwsMessageEvent[]> {
   const result = await runDwsJson<DwsMessageListResponse>([
     "chat", "message", "list", "--group", groupId, "--time", formatDwsTime(from),
-    "--direction", "newer", "--limit", "50",
+    "--direction", "newer", "--limit", String(limit),
   ]);
   return (result.messages ?? []).map((message) => ({
     conversation_id: message.conversationId || message.openConversationId,
@@ -209,10 +209,10 @@ export async function listGroupMembers(groupId: string): Promise<GroupMember[]> 
 }
 
 export async function listConversations(): Promise<Array<{ openConversationId?: string; conversationName?: string }>> {
-  const result = await runDwsJson<DwsConversationListResponse>([
-    "chat", "+conversation-list", "--page-all", "--page-limit", "5", "--max-items", "500",
+  const result = await runDwsJson<{ conversations?: Array<{ openConversationId?: string; conversationName?: string }>; chats?: Array<{ openConversationId?: string; name?: string }> }>([
+    "chat", "+chat-list", "--types", "group", "--page-size", "10",
   ]);
-  return result.conversations ?? [];
+  return result.conversations ?? result.chats?.map((chat) => ({ openConversationId: chat.openConversationId, conversationName: chat.name })) ?? [];
 }
 
 export function startGroupEventStream(eventName: string, maxEvents?: string, groupId?: string): ChildProcessWithoutNullStreams {

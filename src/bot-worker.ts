@@ -137,6 +137,16 @@ try {
       } catch { /* keep the safe default */ }
       writeBotStatus(enabled, connected);
     },
+    getShowElapsed: () => {
+      try { return (JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as { showElapsed?: unknown }).showElapsed !== false; }
+      catch { return true; }
+    },
+    getCardUpdateIntervalMs: () => {
+      try {
+        const value = (JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as { cardUpdateIntervalMs?: unknown }).cardUpdateIntervalMs;
+        return Number.isFinite(value) ? Number(value) : 3_000;
+      } catch { return 3_000; }
+    },
     getPrivateChatEnabled: () => {
       try { return (JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials).privateChatEnabled !== false; }
       catch { return true; }

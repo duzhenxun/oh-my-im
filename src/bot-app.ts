@@ -489,6 +489,8 @@ export async function runApp(
     getCommandKeywords?: () => CommandKeywordsConfig | undefined;
     getSuperAdminUserIds?: () => string[];
     getPrivateChatEnabled?: () => boolean;
+    getCardUpdateIntervalMs?: () => number;
+    getShowElapsed?: () => boolean;
     onConnectionStatus?: (connected: boolean) => void;
   } = {},
 ): Promise<void> {
@@ -616,7 +618,8 @@ export async function runApp(
       return minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
     };
     const title = `【${label}】`;
-    const processingTitle = () => `🔵 ${title}处理中... (${formatElapsed()})`;
+    const processingTitle = () => options.getShowElapsed?.() === false ? `🔵 ${title}处理中...` : `🔵 ${title}处理中... (${formatElapsed()})`;
+    const finishedTitle = (icon: string, state: string) => options.getShowElapsed?.() === false ? `${icon} ${title}${state}` : `${icon} ${title}${state} 总耗时 ${formatElapsed()}`;
     const reply = await bot.sendThinkingCard(message, `${label} 正在处理...`, processingTitle());
     let elapsedTimer: ReturnType<typeof setInterval> | undefined;
     let latestCardContent = `${label} 正在处理...`;
@@ -626,7 +629,7 @@ export async function runApp(
     try {
       let latestStats: Record<string, number> = {};
       let lastUpdateAt = 0;
-      const cardUpdateInterval = selectedAgent === "pi" ? 1_000 : 500;
+      const cardUpdateInterval = Math.max(500, options.getCardUpdateIntervalMs?.() ?? 3_000);
       let pendingUpdate: ReturnType<typeof setTimeout> | undefined;
 
       const updateCard = (title: string, content: string, force = false) => {
@@ -688,7 +691,7 @@ export async function runApp(
       state.sessions[agent] = result.sessionId ?? state.sessions[agent];
       const toolCount = Object.values(result.toolStats).reduce((total, count) => total + count, 0);
       const note = `处理详情 · 1 条消息 · ${toolCount} 次工具调用`;
-      await bot.updateReply(reply, `✅ ${title}完成 总耗时 ${formatElapsed()}`, buildCardContent(result.text, note));
+      await bot.updateReply(reply, finishedTitle("✅", "完成"), buildCardContent(result.text, note));
       await appendConversationLog({
         id: `${message.conversationId}:${taskStartedAt}`,
         createdAt: new Date().toISOString(),
@@ -711,7 +714,7 @@ export async function runApp(
       }
       if (state.paused) {
         log.info(`${label} task paused by user`);
-        await bot.updateReply(reply, `🔴 ${title}处理暂停 总耗时 ${formatElapsed()}`, latestCardContent);
+        await bot.updateReply(reply, finishedTitle("🔴", "处理暂停"), latestCardContent);
         await appendConversationLog({
           id: `${message.conversationId}:${taskStartedAt}`,
           createdAt: new Date().toISOString(), conversationType: "personal",
@@ -724,7 +727,7 @@ export async function runApp(
       } else {
         log.error(`${label} execution failed`, err);
         const errorMessage = err instanceof Error ? err.message : String(err);
-        await bot.updateReply(reply, `❌ ${title}处理失败 总耗时 ${formatElapsed()}`, `${label} 执行失败：${errorMessage}`);
+        await bot.updateReply(reply, finishedTitle("❌", "处理失败"), `${label} 执行失败：${errorMessage}`);
         await appendConversationLog({
           id: `${message.conversationId}:${taskStartedAt}`,
           createdAt: new Date().toISOString(),
