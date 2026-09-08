@@ -1,0 +1,241 @@
+import { spawn } from "node:child_process";
+import { open, readdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { AgentCallbacks, AgentResult, AgentSessionInfo } from "./index.js";
+import type { Config } from "../config.js";
+import { createLogger } from "../logger.js";
+import { asObject, attachJsonlReader, createAgentEnv, type JsonObject } from "./process-utils.js";
+
+const log = createLogger("Pi");
+
+async function findJsonlFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  const visit = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    await Promise.all(entries.map(async (entry) => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(path);
+    }));
+  };
+  await visit(root);
+  return files;
+}
+
+async function readPrefix(path: string, size = 128 * 1024): Promise<string> {
+  const file = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(size);
+    const { bytesRead } = await file.read(buffer, 0, size, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await file.close();
+  }
+}
+
+export async function listPiSessions(_config: Config): Promise<AgentSessionInfo[]> {
+  const root = process.env.PI_CODING_AGENT_SESSION_DIR?.trim() || join(homedir(), ".pi", "agent", "sessions");
+  const files = await findJsonlFiles(root);
+  const sessions = await Promise.all(files.map(async (path): Promise<AgentSessionInfo | undefined> => {
+    try {
+      const lines = (await readPrefix(path)).split(/\r?\n/).filter(Boolean);
+      const header = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+      if (header.type !== "session" || typeof header.id !== "string") return undefined;
+      let title: string | undefined;
+      let summary: string | undefined;
+      for (const line of lines.slice(1)) {
+        const event = JSON.parse(line) as Record<string, unknown>;
+        const message = asObject(event.message);
+        if (event.type !== "message" || !Array.isArray(message?.content)) continue;
+        const text = message.content.flatMap((part) => {
+          const item = asObject(part);
+          return item?.type === "text" && typeof item.text === "string" ? [item.text] : [];
+        }).join(" ").replace(/\s+/g, " ").trim().slice(0, 120) || undefined;
+        if (message.role === "user" && !title) title = text;
+        if (message.role === "assistant" && text) summary = text;
+      }
+      return {
+        id: header.id,
+        title,
+        summary,
+        createdAt: typeof header.timestamp === "string" ? header.timestamp : undefined,
+        updatedAt: typeof header.timestamp === "string" ? header.timestamp : undefined,
+        cwd: typeof header.cwd === "string" ? header.cwd : undefined,
+      };
+    } catch {
+      return undefined;
+    }
+  }));
+  return sessions.filter((item): item is AgentSessionInfo => Boolean(item))
+    .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+}
+
+function extractAssistantText(message: unknown): string | undefined {
+  const value = asObject(message);
+  if (!value || value.role !== "assistant" || !Array.isArray(value.content)) return undefined;
+  const text = value.content.flatMap((part) => {
+    const item = asObject(part);
+    return item?.type === "text" && typeof item.text === "string" ? [item.text] : [];
+  }).join("");
+  return text || undefined;
+}
+
+function runPiOnce(
+  prompt: string,
+  sessionId: string | undefined,
+  config: Config,
+  callbacks: AgentCallbacks = {},
+): Promise<AgentResult> {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const args = ["--mode", "rpc", "--approve"];
+    if (config.agentModel) args.push("--model", config.agentModel);
+    if (sessionId) args.push("--session", sessionId);
+    const env = createAgentEnv(config.codexProxy);
+
+    const cliPath = config.piCliPath || "pi";
+    log.info(`spawn ${cliPath} ${args.join(" ")}`);
+    const child = spawn(cliPath, args, {
+      cwd: config.codexWorkDir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let completed = false;
+    let accumulated = "";
+    let authoritativeText = "";
+    let nextSessionId = sessionId;
+    let stderr = "";
+    const toolStats: Record<string, number> = {};
+    const seenToolCalls = new Set<string>();
+
+    const finish = () => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      child.kill("SIGTERM");
+      resolve({
+        sessionId: nextSessionId,
+        text: (authoritativeText || accumulated).trim() || "(无输出)",
+        toolStats,
+        durationMs: Date.now() - start,
+      });
+    };
+    const fail = (message: string) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      child.kill("SIGTERM");
+      reject(new Error(message));
+    };
+    const timeout = setTimeout(() => {
+      log.warn(`timeout after ${config.cliTimeoutMs}ms`);
+      fail(`Pi Agent timeout after ${Math.round(config.cliTimeoutMs / 1000)}s`);
+    }, config.cliTimeoutMs);
+    timeout.unref();
+
+    callbacks.onAbortReady?.(() => {
+      if (!completed) {
+        child.stdin.write(`${JSON.stringify({ type: "abort" })}\n`);
+        setTimeout(() => child.kill("SIGTERM"), 1000).unref();
+      }
+    });
+    callbacks.onSteerReady?.((message) => {
+      if (completed || child.stdin.destroyed || !child.stdin.writable) return false;
+      try {
+        child.stdin.write(`${JSON.stringify({ type: "steer", message })}\n`);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderr += text;
+      for (const line of text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+        log.debug(`stderr: ${line.slice(0, 1_000)}`);
+      }
+    });
+
+    attachJsonlReader(child.stdout, (line) => {
+      let event: JsonObject;
+      try {
+        event = JSON.parse(line) as JsonObject;
+      } catch {
+        log.warn(`ignored non-JSON Pi output: ${line.slice(0, 240)}`);
+        return;
+      }
+
+      if (event.type === "response" && event.success === false) {
+        fail(typeof event.error === "string" ? event.error : "Pi Agent command failed");
+        return;
+      }
+      if (event.type === "response" && event.command === "get_state" && event.success === true) {
+        const data = asObject(event.data);
+        if (typeof data?.sessionId === "string" && data.sessionId) nextSessionId = data.sessionId;
+        child.stdin.write(`${JSON.stringify({ id: "prompt", type: "prompt", message: prompt })}\n`);
+        return;
+      }
+      if (event.type === "message_update") {
+        const update = asObject(event.assistantMessageEvent);
+        if (update?.type === "text_delta" && typeof update.delta === "string") {
+          accumulated += update.delta;
+          callbacks.onText?.(accumulated);
+        }
+        return;
+      }
+      if (event.type === "tool_execution_start") {
+        const name = typeof event.toolName === "string" ? event.toolName : "tool";
+        const callId = typeof event.toolCallId === "string" ? event.toolCallId : `${name}:${seenToolCalls.size}`;
+        if (!seenToolCalls.has(callId)) {
+          seenToolCalls.add(callId);
+          toolStats[name] = (toolStats[name] ?? 0) + 1;
+          callbacks.onToolUse?.(name, { ...toolStats });
+        }
+        return;
+      }
+      if (event.type === "message_end") {
+        const text = extractAssistantText(event.message);
+        if (text) authoritativeText = text;
+        return;
+      }
+      if (event.type === "agent_settled") finish();
+    });
+
+    child.on("error", (err) => {
+      log.error("spawn error", err);
+      fail(err.message);
+    });
+    child.on("close", (code) => {
+      if (completed) return;
+      if (code && code !== 0) {
+        fail(stderr.trim() || `Pi Agent exited with code ${code}`);
+        return;
+      }
+      finish();
+    });
+
+    child.stdin.write(`${JSON.stringify({ id: "state", type: "get_state" })}\n`);
+  });
+}
+
+function isMissingSessionError(error: unknown): boolean {
+  return error instanceof Error && /No session found matching ['"]?[^'"\s]+['"]?/i.test(error.message);
+}
+
+export async function runPi(
+  prompt: string,
+  sessionId: string | undefined,
+  config: Config,
+  callbacks: AgentCallbacks = {},
+): Promise<AgentResult> {
+  try {
+    return await runPiOnce(prompt, sessionId, config, callbacks);
+  } catch (error) {
+    if (!sessionId || !isMissingSessionError(error)) throw error;
+    log.warn(`session=${sessionId} was not found; starting a new Pi session`);
+    return runPiOnce(prompt, undefined, config, callbacks);
+  }
+}

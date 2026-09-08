@@ -1,0 +1,205 @@
+{
+  "complete": true,
+  "contractVersion": "im.message-list.v1",
+  "count": 12,
+  "failedCount": 0,
+  "failures": [],
+  "hasMore": false,
+  "identityResult": {
+    "hint": "若原始任务包含自然人发送者条件，请先将目标人解析为唯一 userId/openDingTalkId，再与 messages[].senderId 比较；禁止直接比较 messages[].sender 展示名。",
+    "negativeConclusionAllowed": false,
+    "status": "requires_query_check"
+  },
+  "messages": [
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-01 14:36:47",
+      "messageId": "msg664Gdgj+plH5FntUFz7AWQ==",
+      "reactions": {
+        "counts": [
+          {
+            "count": 1,
+            "emoji": "OK"
+          }
+        ],
+        "details": [
+          {
+            "emoji": "OK",
+            "replyUsers": [
+              "蘑菇罐头"
+            ]
+          }
+        ]
+      },
+      "sender": "叶玉松",
+      "senderId": "DZyRu3o9aXvmMVZEvBYhJVAkjwmr2LAyZ",
+      "text": "@杜雨峰 在这个群里就行"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-02 10:54:55",
+      "messageId": "msgYNG0pcKNqE9Z/AA+wAGrWQ==",
+      "sender": "杜振训",
+      "senderId": "DZyRu3o9aXvmiSh7BJa5S4EQiEiE",
+      "text": "中秋"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:57:58",
+      "messageId": "msg5J61y0LDVD+vMAvK+tEw8Q==",
+      "sender": "杜振训",
+      "senderId": "DZyRu3o9aXvmiSh7BJa5S4EQiEiE",
+      "text": "11"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:58:00",
+      "messageId": "msgmwD/Fq9144T+vlO+eb3Otw==",
+      "sender": "映客活动AI",
+      "senderId": "DZyRu3o9aXvnuvAWt3vt9XVScqdIiiDdmm",
+      "text": "大家好！我是 映客活动AI 机器人，很高兴为你们服务。"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:58:03",
+      "messageId": "msgiVDF+GniL7v0WU3aB4/JSg==",
+      "sender": "映客活动AI",
+      "senderId": "DZyRu3o9aXvnuvAWt3vt9XVScqdIiiDdmm",
+      "text": "已开启 杜振训 在本群的AI 能力。"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:58:19",
+      "messageId": "msgfr3sJPOmnWhkRAMuwyM+/Q==",
+      "sender": "映客活动AI",
+      "senderId": "DZyRu3o9aXvnuvAWt3vt9XVScqdIiiDdmm",
+      "text": "[等一等] 正在分析…\n{\"logo\":\"@lALPDfJ6V_FPDmvNAfTNAfQ\",\"title\":{\"text\":\"🔴 【Codex Agent】处理暂停 总耗时 17s\",\"type\":\"text\"}}"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:58:19",
+      "messageId": "msgk6JZs6jJOziPwKT2FfqN1Q==",
+      "resourceRefs": [
+        {
+          "download": {
+            "arguments": {
+              "message-id": "msgk6JZs6jJOziPwKT2FfqN1Q==",
+              "open-conversation-id": "cidZWixF+1HpfT24A58MA1OcA==",
+              "resource-id": "@lR_PJwDv9Ib9L28AALAjF6oVgZFCvgpwqKoUexAA",
+              "type": "mediaId"
+            },
+            "missing": [],
+            "ready": true,
+            "shortcut": "+messages-resource-download"
+          },
+          "resourceId": "@lR_PJwDv9Ib9L28AALAjF6oVgZFCvgpwqKoUexAA",
+          "type": "mediaId"
+        }
+      ],
+      "sender": "杜振训",
+      "senderId": "DZyRu3o9aXvmiSh7BJa5S4EQiEiE",
+      "text": "分析这个群里发的 Wiki 活动\n[语音消息](mediaId=@lR_PJwDv9Ib9L28AALAjF6oVgZFCvgpwqKoUexAA)"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:58:32",
+      "messageId": "msguOU3dCKbV6VyZEM8XLxNBA==",
+      "sender": "杜振训",
+      "senderId": "DZyRu3o9aXvmiSh7BJa5S4EQiEiE",
+      "text": "stop"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:58:39",
+      "messageId": "msgV+iSaNFZg+jy8xOGy5j1wg==",
+      "sender": "杜振训",
+      "senderId": "DZyRu3o9aXvmiSh7BJa5S4EQiEiE",
+      "text": "pi"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:58:46",
+      "messageId": "msg2FX8WsT9PoDjCdlYaxI7TQ==",
+      "sender": "映客活动AI",
+      "senderId": "DZyRu3o9aXvnuvAWt3vt9XVScqdIiiDdmm",
+      "text": "当前已切换到 Pi Agent。\n\n使用方法：直接发送问题或任务即可；发送已配置的暂停指令可暂停当前任务，发送 Agent 切换指令可再次切换。"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:59:49",
+      "messageId": "msgwS9iUXIdwq0CKMYkt2h1lw==",
+      "resourceRefs": [
+        {
+          "download": {
+            "arguments": {
+              "message-id": "msgwS9iUXIdwq0CKMYkt2h1lw==",
+              "open-conversation-id": "cidZWixF+1HpfT24A58MA1OcA==",
+              "resource-id": "@lR_PKefiZY6G6y8AALD2B_1oj1wyoApwqQJXJ5oA",
+              "type": "mediaId"
+            },
+            "missing": [],
+            "ready": true,
+            "shortcut": "+messages-resource-download"
+          },
+          "resourceId": "@lR_PKefiZY6G6y8AALD2B_1oj1wyoApwqQJXJ5oA",
+          "type": "mediaId"
+        }
+      ],
+      "sender": "杜振训",
+      "senderId": "DZyRu3o9aXvmiSh7BJa5S4EQiEiE",
+      "text": "这个钉钉群有个群公告，上面有一个 Wiki 文档，是这个项目的需求文档。你自己分析一下，看看有没有什么问题，然后梳理一下有哪些功能需要开发\n[语音消息](mediaId=@lR_PKefiZY6G6y8AALD2B_1oj1wyoApwqQJXJ5oA)"
+    },
+    {
+      "conversationId": "cidZWixF+1HpfT24A58MA1OcA==",
+      "createTime": "2026-09-07 21:59:50",
+      "messageId": "msgbfFwxZ1FDj3a5MspVU6UjA==",
+      "sender": "映客活动AI",
+      "senderId": "DZyRu3o9aXvnuvAWt3vt9XVScqdIiiDdmm",
+      "text": "调用工具：bash x7\n{\"logo\":\"@lALPDfJ6V_FPDmvNAfTNAfQ\",\"title\":{\"text\":\"🔷 【Pi gpt-5.6-luna】处理中... 1m 21s\",\"type\":\"text\"}}"
+    }
+  ],
+  "pagesFetched": 1,
+  "paginationKnown": true,
+  "partial": false,
+  "queryRange": {
+    "endTime": "2026-09-08T00:00:00+08:00",
+    "order": "asc",
+    "semantics": "[start,end)",
+    "startTime": "2026-09-01T00:00:00+08:00"
+  },
+  "resourceDownloads": {
+    "deduplicatedCount": 0,
+    "discoveredCount": 2,
+    "downloadedCount": 2,
+    "downloads": [
+      {
+        "localPath": "downloads/lR_PJwDv9Ib9L28AALAjF6oVgZFCvgpwqKoUexAA.ogg",
+        "messageId": "msgk6JZs6jJOziPwKT2FfqN1Q==",
+        "resourceId": "@lR_PJwDv9Ib9L28AALAjF6oVgZFCvgpwqKoUexAA",
+        "resourceType": "mediaId",
+        "sizeBytes": 15401
+      },
+      {
+        "localPath": "downloads/lR_PKefiZY6G6y8AALD2B_1oj1wyoApwqQJXJ5oA.ogg",
+        "messageId": "msgwS9iUXIdwq0CKMYkt2h1lw==",
+        "resourceId": "@lR_PKefiZY6G6y8AALD2B_1oj1wyoApwqQJXJ5oA",
+        "resourceType": "mediaId",
+        "sizeBytes": 44746
+      }
+    ],
+    "failedCount": 0,
+    "failures": [],
+    "ok": true,
+    "partial": false,
+    "requestedCount": 2
+  },
+  "senderFilter": {
+    "applied": false,
+    "requested": false,
+    "status": "not_requested"
+  },
+  "stopReason": "source_complete",
+  "truncated": false,
+  "truncatedByPageLimit": false,
+  "truncatedByResultLimit": false
+}

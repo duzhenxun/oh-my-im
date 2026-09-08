@@ -1,0 +1,11 @@
+diff --git a/src/bot-app.ts b/src/bot-app.ts
+--- a/src/bot-app.ts
++++ b/src/bot-app.ts
+@@ -741,6 +741,6 @@ export async function runApp(
+           const stats = formatStats(latestStats);
+           const delta = content.startsWith(lastStreamText) ? content.slice(lastStreamText.length) : content;
+           lastStreamText = content;
+-          if (delta.trim()) streamedText = streamedText ? `${streamedText}\n\n${delta.trim()}` : delta.trim();
++          if (delta) streamedText += delta;
+           updateCard(processingTitle(), buildCardContent(streamedText || content, stats ? `工具：${stats}` : undefined));
+         },

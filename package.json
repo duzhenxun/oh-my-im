@@ -1,0 +1,46 @@
+{
+  "name": "oh-my-im",
+  "version": "0.1.16",
+  "author": {
+    "name": "杜振训",
+    "email": "duzhenxun@126.com"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "outputs"
+  ],
+  "bin": {
+    "omi": "dist/omi.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/duzhenxun/oh-my-im.git"
+  },
+  "homepage": "https://github.com/duzhenxun/oh-my-im#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "dev:bot": "tsx src/bot-worker.ts",
+    "dev:dws": "tsx src/group-worker.ts",
+    "build": "rm -rf dist && tsc",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "start": "node dist/omi.js",
+    "omi": "node dist/omi.js",
+    "help": "node dist/omi.js help"
+  },
+  "dependencies": {
+    "dingtalk-stream": "^2.1.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
