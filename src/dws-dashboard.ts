@@ -5,10 +5,25 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 
 export type ReplyFormat = "markdown" | "plain";
 export type ResponseMode = "card" | "text";
-export type AgentType = "codex" | "pi";
-export interface AgentModels { codex: string; pi: string; }
+export type AgentType = "codex" | "pi" | "opencode";
+export interface AgentModels { codex: string; pi: string; opencode: string; }
+
+export function isPiModelAllowed(model: string): boolean {
+  return !model.startsWith("nvidia");
+}
+
+export function isOpenCodeModelAllowed(model: string): boolean {
+  return model.startsWith("opencode") && model.endsWith("-free") || model.startsWith("inke");
+}
+
 export function normalizeAgentModel(agent: AgentType, value: string | undefined): string {
   const model = value?.trim() || "";
+  if (agent === "opencode") {
+    if (!model) return "";
+    const normalized = model.includes("/") ? model : model.split(/\s+/).slice(0, 2).join("/");
+    return isOpenCodeModelAllowed(normalized) ? normalized : "";
+  }
+  if (agent === "pi" && !isPiModelAllowed(model)) return "";
   if (agent !== "pi" || !model || model.includes("/")) return model;
   const parts = model.split(/\s+/);
   return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : model;
@@ -19,6 +34,7 @@ export interface CommandKeywordsConfig {
   monitorStop: string[];
   switchPi: string[];
   switchCodex: string[];
+  switchOpencode: string[];
 }
 
 export interface MonitorTarget { groupId: string; groupName: string; senderId: string; senderName: string; }
@@ -54,7 +70,7 @@ export interface DashboardHooks {
   getSystemLogs?: (offset?: number) => Promise<{ content: string; path: string; size: number; nextOffset: number; reset: boolean }>;
   restartSystem?: () => Promise<void>;
   controlSystemProcess?: (role: string, action: "start" | "stop") => Promise<void>;
-  listAgentModels?: (agent: AgentType) => Promise<string[]>;
+  listAgentModels?: (agent: AgentType) => Promise<{ models: string[]; defaultModel?: string }>;
 }
 
 export interface DashboardServerOptions {
@@ -90,12 +106,13 @@ function normalizeConfig(value: unknown): DashboardConfig {
   const positiveInteger = (value: unknown, fallback: number, name: string) => { const n = value === undefined ? fallback : Number(value); if (!Number.isInteger(n) || n < 1 || n > 500) throw new Error(`${name}需为 1-500 的整数`); return n; };
   const agentModel = source.agentModel === undefined ? "" : String(source.agentModel).trim();
   if (agentModel.length > 200) throw new Error("Agent 模型名称过长");
-  const modelSource = source.agentModels && typeof source.agentModels === "object" ? source.agentModels as { codex?: unknown; pi?: unknown } : {};
+  const modelSource = source.agentModels && typeof source.agentModels === "object" ? source.agentModels as { codex?: unknown; pi?: unknown; opencode?: unknown } : {};
   const agentModels: AgentModels = {
     codex: (typeof modelSource.codex === "string" ? modelSource.codex.trim() : "") || (source.agent === "codex" ? agentModel : ""),
     pi: normalizeAgentModel("pi", (typeof modelSource.pi === "string" ? modelSource.pi.trim() : "") || (source.agent === "pi" ? agentModel : "")),
+    opencode: normalizeAgentModel("opencode", (typeof modelSource.opencode === "string" ? modelSource.opencode.trim() : "") || (source.agent === "opencode" ? agentModel : "")),
   };
-  if (agentModels.codex.length > 200 || agentModels.pi.length > 200) throw new Error("Agent 模型名称过长");
+  if (agentModels.codex.length > 200 || agentModels.pi.length > 200 || agentModels.opencode.length > 200) throw new Error("Agent 模型名称过长");
   const personalHistoryMessageLimit = positiveInteger(source.personalHistoryMessageLimit, 10, "每次消息数量");
   const personalHistoryPollIntervalSeconds = source.personalHistoryPollIntervalSeconds === undefined ? 15 : Number(source.personalHistoryPollIntervalSeconds);
   if (!Number.isFinite(personalHistoryPollIntervalSeconds) || personalHistoryPollIntervalSeconds < 0 || personalHistoryPollIntervalSeconds > 3600) throw new Error("个人群消息拉取间隔需为 0-3600 秒");
@@ -121,7 +138,7 @@ function normalizeConfig(value: unknown): DashboardConfig {
     return target;
   });
   if (source.replyFormat !== "markdown" && source.replyFormat !== "plain") throw new Error("回复格式只能是 markdown 或 plain");
-  if (source.agent !== "codex" && source.agent !== "pi") throw new Error("Agent 只能是 Codex CLI 或 Pi Agent");
+  if (source.agent !== "codex" && source.agent !== "pi" && source.agent !== "opencode") throw new Error("Agent 只能是 Codex CLI、Pi Agent 或 OpenCode");
   if (!Array.isArray(source.botAllowedUserIds)) throw new Error("请至少配置一名机器人单聊授权人员");
   const botAllowedUserIds = [...new Set(source.botAllowedUserIds.filter((id): id is string => typeof id === "string").map((id) => id.trim()).filter(Boolean))];
   // The dashboard is also the first-run setup screen. Allow an incomplete
@@ -143,13 +160,13 @@ function normalizeConfig(value: unknown): DashboardConfig {
   if (!source.commandKeywords || typeof source.commandKeywords !== "object") throw new Error("请配置消息指令关键词");
   const commandSource = source.commandKeywords as Record<string, unknown>;
   const keywordList = (key: string): string[] => {
-    if (!Array.isArray(commandSource[key])) throw new Error(`指令关键词 ${key} 格式无效`);
+    if (!Array.isArray(commandSource[key])) return [];
     const values = [...new Set(commandSource[key].filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))];
     return values;
   };
   const commandKeywords: CommandKeywordsConfig = {
     pause: keywordList("pause"), monitorOpen: keywordList("monitorOpen"), monitorStop: keywordList("monitorStop"),
-    switchPi: keywordList("switchPi"), switchCodex: keywordList("switchCodex"),
+    switchPi: keywordList("switchPi"), switchCodex: keywordList("switchCodex"), switchOpencode: keywordList("switchOpencode"),
   };
   const groupPromptSuffix = typeof source.groupPromptSuffix === "string" ? source.groupPromptSuffix : source.groupPromptPrefix;
   if (typeof groupPromptSuffix !== "string") throw new Error("消息后缀格式无效");
@@ -181,7 +198,7 @@ export function startDashboard(port: number, hooks: DashboardHooks, options: Das
       field.lastChild.textContent = ' 秒（0：完成后一次性发送，1-60：按间隔更新）';
     }
   }
-  panel.innerHTML = '<div class="field"><label>Pi 默认模型</label><select id="piModel"><option value="">使用 Pi CLI 默认模型</option></select><div class="field-help">群聊和私聊使用 Pi 时都采用此模型。Codex 始终使用系统 Codex CLI 的默认模型。</div></div>';
+  panel.innerHTML = '<div class="field"><label>Pi 默认模型</label><select id="piModel"><option value="">使用 Pi CLI 默认模型</option></select><div class="field-help">群聊和私聊使用 Pi 时都采用此模型。</div></div><div class="field" style="margin-top:14px"><label>OpenCode 默认模型</label><select id="opencodeModel"><option value="">使用 OpenCode CLI 默认模型</option></select><div class="field-help">模型来自 OpenCode CLI，格式为 provider/model。</div></div>';
   agentSettings.querySelector('.agent-row')?.append(panel);
   const loadModels = async (agent) => {
     const select = document.querySelector('#' + agent + 'Model');
@@ -191,12 +208,14 @@ export function startDashboard(port: number, hooks: DashboardHooks, options: Das
       const response = await fetch('/api/agent-models?agent=' + encodeURIComponent(agent), { cache: 'no-store' });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || '模型列表读取失败');
-      select.replaceChildren(new Option(agent === 'codex' ? '使用 Codex CLI 默认模型' : '使用 Pi CLI 默认模型', ''));
+      const defaultModel = typeof body.defaultModel === 'string' ? body.defaultModel : '';
+      select.replaceChildren(new Option(defaultModel && agent === 'opencode' ? '使用 OpenCode CLI 默认模型（' + defaultModel + '）' : agent === 'codex' ? '使用 Codex CLI 默认模型' : agent === 'opencode' ? '使用 OpenCode CLI 默认模型' : '使用 Pi CLI 默认模型', ''));
       body.models.forEach((model) => select.append(new Option(model, model)));
-      if (selected && ![...select.options].some((option) => option.value === selected)) select.append(new Option(selected + '（当前配置）', selected));
-      select.value = selected;
+      const selectedAllowed = agent === 'codex' || agent === 'pi' && !selected.startsWith('nvidia') || agent === 'opencode' && ((selected.startsWith('opencode') && selected.endsWith('-free')) || selected.startsWith('inke'));
+      if (selected && selectedAllowed && ![...select.options].some((option) => option.value === selected)) select.append(new Option(selected + '（当前配置）', selected));
+      select.value = selected || (agent === 'opencode' ? defaultModel : '');
     } catch (error) {
-      select.replaceChildren(new Option((agent === 'codex' ? 'Codex' : 'Pi') + ' 模型列表不可用，请检查 CLI', ''));
+      select.replaceChildren(new Option((agent === 'codex' ? 'Codex' : agent === 'opencode' ? 'OpenCode' : 'Pi') + ' 模型列表不可用，请检查 CLI', ''));
       if (selected) select.append(new Option(selected + '（当前配置）', selected));
       select.value = selected;
       select.title = error instanceof Error ? error.message : String(error);
@@ -214,7 +233,8 @@ export function startDashboard(port: number, hooks: DashboardHooks, options: Das
     document.querySelectorAll('input[name=responseMode]').forEach((input) => { input.checked = input.value === responseMode; });
     document.querySelector('#piModel').value = models.pi || '';
     await loadModels('pi');
-    document.querySelector('#piModel').value = models.pi || '';
+    document.querySelector('#opencodeModel').value = models.opencode || '';
+    await loadModels('opencode');
   };
   const nativeFetch = window.fetch.bind(window);
   window.fetch = (input, init) => {
@@ -225,6 +245,11 @@ export function startDashboard(port: number, hooks: DashboardHooks, options: Das
         body.agentModels = {
           codex: '',
           pi: document.querySelector('#piModel')?.value || '',
+          opencode: document.querySelector('#opencodeModel')?.value || '',
+        };
+        body.commandKeywords = {
+          ...body.commandKeywords,
+          switchOpencode: (document.querySelector('#keywordsSwitchOpencode')?.value || '').split(/[|｜]+/).map((value) => value.trim()).filter(Boolean),
         };
         body.responseMode = document.querySelector('input[name=responseMode]:checked')?.value === 'text' ? 'text' : 'card';
         body.showProcessingDetails = document.querySelector('#showProcessingDetails')?.checked === true;
@@ -249,7 +274,9 @@ export function startDashboard(port: number, hooks: DashboardHooks, options: Das
   }, 500);
 })();
 </script>`;
-  const dashboardPage = PAGE.replace('</body></html>', modelSettingsScript + '</body></html>');
+  const dashboardPage = PAGE.replace('value="pi"> Pi Agent</label>', 'value="pi"> Pi Agent</label><label><input type="radio" name="agent" value="opencode"> OpenCode Agent</label>')
+    .replace('<div class="field"><label>切换到 Pi 指令</label><input type="text" id="keywordsSwitchPi" placeholder="例如：切pi|切换pi|换pi"></div>', '<div class="field"><label>切换到 Pi 指令</label><input type="text" id="keywordsSwitchPi" placeholder="例如：切pi|切换pi|换pi"></div><div class="field"><label>切换到 OpenCode 指令</label><input type="text" id="keywordsSwitchOpencode" placeholder="例如：切opencode|切换opencode|换opencode"></div>')
+    .replace('</body></html>', modelSettingsScript + '</body></html>');
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (request.method === "GET" && url.pathname === "/favicon.ico") {
@@ -283,8 +310,9 @@ export function startDashboard(port: number, hooks: DashboardHooks, options: Das
     }
     if (request.method === "GET" && url.pathname === "/api/agent-models") {
       if (!hooks.listAgentModels) return sendJson(response, 501, { error: "Agent 模型查询不可用" });
-      const agent = url.searchParams.get("agent") === "pi" ? "pi" : "codex";
-      void hooks.listAgentModels(agent).then((models) => sendJson(response, 200, { models })).catch((err) => sendJson(response, 500, { error: err instanceof Error ? err.message : String(err) }));
+      const requestedAgent = url.searchParams.get("agent");
+      const agent = requestedAgent === "pi" || requestedAgent === "opencode" ? requestedAgent : "codex";
+      void hooks.listAgentModels(agent).then((result) => sendJson(response, 200, result)).catch((err) => sendJson(response, 500, { error: err instanceof Error ? err.message : String(err) }));
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/system-status") {
@@ -427,7 +455,7 @@ async function loadMembers(rule,groupId,selected){const hint=rule.querySelector(
 function addDraftRule(){const rule=document.createElement('article');rule.className='rule';rule.innerHTML='<div class="rule-grid"><div class="field group-picker"><label>钉钉群</label><div class="line"><input data-key="groupName" placeholder="输入群名称"><button class="search" title="搜索群">搜索</button></div><select class="group"><option value="">搜索后选择精确群</option></select></div><div class="field"><label>钉钉人员</label><div data-key="senderId" class="member-list">选择群后加载成员</div><input data-key="groupId" type="hidden"></div><button class="delete" title="删除规则">×</button><div class="members"></div></div>';const groupName=rule.querySelector('[data-key=groupName]'),groupId=rule.querySelector('[data-key=groupId]'),groups=rule.querySelector('.group');rule.querySelector('.delete').onclick=()=>rule.remove();rule.querySelector('.search').onclick=async()=>{const q=groupName.value.trim();if(!q){notice.textContent='请输入群名称';notice.className='notice error';return}groups.replaceChildren(option('','正在搜索...'));try{const r=await fetch('/api/groups?q='+encodeURIComponent(q));const b=await r.json();if(!r.ok)throw new Error(b.error||'群搜索失败');groups.replaceChildren(option('','请选择精确群'));b.groups.forEach(g=>groups.append(option(g.groupId,g.groupName+'（'+(g.memberCount??'?')+' 人）')));if(!b.groups.length)notice.textContent='未找到匹配群';}catch(e){notice.textContent=e.message;notice.className='notice error'}};groups.onchange=()=>{const g=groups.options[groups.selectedIndex];groupId.value=groups.value;groupName.value=groups.value?g.textContent.replace(/（.*$/,''):groupName.value;if(groups.value)loadMembers(rule,groups.value,[])};rules.append(rule)}
 async function loadConfiguredMembers(rule,group){const people=rule.querySelector('.people'),selected=new Set(group.targets.map(target=>target.senderId));people.textContent='正在加载群成员...';try{const r=await fetch('/api/groups/'+encodeURIComponent(group.groupId)+'/members'),body=await r.json();if(!r.ok)throw new Error(body.error||'成员加载失败');const members=[...body.members].sort((a,b)=>Number(selected.has(b.senderId))-Number(selected.has(a.senderId)));people.replaceChildren();members.forEach(member=>{const label=document.createElement('label');label.className='member-option';const box=document.createElement('input');box.type='checkbox';box.dataset.senderId=member.senderId;box.checked=selected.has(member.senderId);const name=document.createElement('span');name.className='member-name';name.textContent=member.senderName;label.append(box,name);const role=memberRole(member.role);if(role){const roleName=document.createElement('span');roleName.className='member-role';roleName.textContent=role;label.append(roleName)}people.append(label)});rule._members=members}catch(e){people.textContent=e.message;people.className='rule-value people error'}}
 function addConfiguredRule(group){const rule=document.createElement('article');rule.className='rule';rule.innerHTML='<div class="rule-grid configured-grid"><div class="field"><label>钉钉群</label><div class="rule-value group-value"></div></div><div class="field"><label>钉钉人员</label><div class="member-list people"></div></div><button class="delete" title="删除规则">×</button></div>';rule._targets=group.targets;rule._group=group;rule.querySelector('.group-value').textContent=group.groupName;rule.querySelector('.delete').onclick=()=>rule.remove();rules.append(rule);void loadConfiguredMembers(rule,group)}
-const keywordIds={pause:'keywordsPause',monitorOpen:'keywordsMonitorOpen',monitorStop:'keywordsMonitorStop',switchPi:'keywordsSwitchPi',switchCodex:'keywordsSwitchCodex'};
+const keywordIds={pause:'keywordsPause',monitorOpen:'keywordsMonitorOpen',monitorStop:'keywordsMonitorStop',switchPi:'keywordsSwitchPi',switchCodex:'keywordsSwitchCodex',switchOpencode:'keywordsSwitchOpencode'};
 const parseKeywords=id=>document.querySelector('#'+id).value.split(/[|｜]+/).map(value=>value.trim()).filter(Boolean);
 function renderStatic(data,replaceConfig=false){rulesPanel.querySelector('.rules-toggle').textContent='钉钉群监控绑定 ('+data.config.targets.length+')';if(replaceConfig){if(document.querySelector('#privateChatEnabled'))document.querySelector('#privateChatEnabled').checked=data.config.privateChatEnabled!==false;document.querySelectorAll('input[name=agent]').forEach(input=>{input.checked=input.value===(data.config.agent||'codex')});document.querySelector('#robotName').value=data.config.robotName||'';document.querySelector('#clientId').value=data.config.clientId||'';document.querySelector('#showElapsed').checked=data.config.showElapsed!==false;document.querySelector('#showProcessingDetails').checked=data.config.showProcessingDetails===true;document.querySelector('#cardUpdateIntervalMs').value=(data.config.cardUpdateIntervalMs??3000)/1000;document.querySelector('#clientSecret').value='';document.querySelector('#webhookUrl').value='';document.querySelector('#personalHistoryMessageLimit').value=data.config.personalHistoryMessageLimit||10;document.querySelector('#personalHistoryPollIntervalSeconds').value=data.config.personalHistoryPollIntervalSeconds??15;document.querySelector('#personalHistoryLookbackMinutes').value=data.config.personalHistoryLookbackMinutes??10;document.querySelector('#robotSenderOpenDingTalkId').value=data.config.robotSenderOpenDingTalkId||'';document.querySelector('#groupPromptPrefix').value=data.config.groupPromptSuffix||'';setBotUsers(data.config.botAllowedUserIds||[],data.config.botAllowedUserNames||{},data.config.botSuperAdminUserIds||[]);Object.entries(keywordIds).forEach(([key,id])=>{document.querySelector('#'+id).value=(data.config.commandKeywords?.[key]||[]).join('|')})}const c=document.querySelector('#connection');if(c){c.textContent=data.status.eventConnected?'事件连接正常':'事件未连接';c.className='status '+(data.status.eventConnected?'connected':'stopped');}const list=document.querySelector('#replies');if(!list)return;if(!data.replies.length){list.className='empty';list.textContent='暂无回复';return}list.className='';const recentReplies=[...data.replies].sort((a,b)=>new Date(a.createdAt||0)-new Date(b.createdAt||0)).slice(-10);const replySignature=recentReplies.map(r=>r.id+':'+r.status+':'+r.content).join('|');if(list.dataset.signature===replySignature)return;const wasAtBottom=list.scrollHeight-list.scrollTop-list.clientHeight<24;list.dataset.signature=replySignature;list.innerHTML=recentReplies.map(r=>{const state=r.status==='processing'?'处理中':r.status==='completed'?'完成':'失败',replyStyle=r.status==='processing'?'#fffbeb;color:#92400e':r.status==='completed'?'#ecfdf3;color:#166534':'#fff1f2;color:#b42318',senderNames=[...new Set((r.senderNames||[]).filter(Boolean))].join('、');const conversationLabel=r.conversationType==='personal'?'个人':'群聊 · 群名：'+esc(r.conversationName||r.groupName||'-');return '<article class="reply"><div class="meta">'+conversationLabel+' · 发送人：'+esc(senderNames||'-')+' · '+fmt(r.createdAt)+' · '+esc(r.agent==='pi'?'Pi':'Codex')+' · '+state+' · '+r.messageCount+' 条消息</div><div style="margin-top:6px;padding:8px;border-radius:4px;background:#eff6ff;color:#174ea6"><pre style="margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace">'+esc(r.question||'')+'</pre></div><div style="margin-top:6px;padding:8px;border-radius:4px;background:'+replyStyle+'"><pre style="margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace">'+esc(r.content)+'</pre></div></article>'}).join('');if(wasAtBottom||recentReplies.length>0)list.scrollTop=list.scrollHeight}
 async function refresh(full=false){try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw new Error('读取状态失败');const data=await r.json();renderStatic(data,full);if(full){rules.replaceChildren();const grouped=new Map();data.config.targets.forEach(t=>{const key=t.groupId;if(!grouped.has(key))grouped.set(key,{groupId:t.groupId,groupName:t.groupName,targets:[]});grouped.get(key).targets.push(t)});grouped.forEach(addConfiguredRule);const formatInput=document.querySelector('input[name=format][value='+data.config.replyFormat+']');if(formatInput)formatInput.checked=true;loaded=true}}catch(e){notice.textContent=e.message;notice.className='notice error'}}

@@ -18,6 +18,16 @@ export function createAgentEnv(proxy?: string): NodeJS.ProcessEnv {
   return env;
 }
 
+export function createOpenCodeEnv(proxy?: string): NodeJS.ProcessEnv {
+  const env = createAgentEnv(proxy);
+  // A parent npm/pnpm process can put a broken opencode shim from an
+  // unrelated node_modules/.bin directory ahead of the working CLI.
+  if (env.PATH) {
+    env.PATH = env.PATH.split(":").filter((entry) => !entry.endsWith("/node_modules/.bin")).join(":");
+  }
+  return env;
+}
+
 /** Read strict LF-delimited JSONL without treating Unicode separators as records. */
 export function attachJsonlReader(
   stream: NodeJS.ReadableStream,

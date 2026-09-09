@@ -2,6 +2,7 @@ import type { AgentType, Config } from "../config.js";
 export type { AgentType } from "../config.js";
 import { listCodexSessions, runCodex } from "./codex-agent.js";
 import { listPiSessions, runPi } from "./pi-agent.js";
+import { listOpenCodeSessions, runOpenCode } from "./opencode-agent.js";
 
 export interface AgentResult {
   sessionId?: string;
@@ -27,7 +28,7 @@ export interface AgentCallbacks {
 }
 
 export function agentLabel(agent: AgentType): string {
-  return agent === "pi" ? "Pi" : "Codex";
+  return agent === "pi" ? "Pi" : agent === "opencode" ? "OpenCode" : "Codex";
 }
 
 export function agentSwitchMessage(agent: AgentType): string {
@@ -39,9 +40,7 @@ export function agentSwitchMessage(agent: AgentType): string {
 }
 
 export function listAgentSessions(agent: AgentType, config: Config): Promise<AgentSessionInfo[]> {
-  return agent === "pi"
-    ? listPiSessions(config)
-    : listCodexSessions(config);
+  return agent === "pi" ? listPiSessions(config) : agent === "opencode" ? listOpenCodeSessions(config) : listCodexSessions(config);
 }
 
 export function runAgent(
@@ -53,5 +52,7 @@ export function runAgent(
 ): Promise<AgentResult> {
   return agent === "pi"
     ? runPi(prompt, sessionId, config, callbacks)
-    : runCodex(prompt, sessionId, config, callbacks);
+    : agent === "opencode"
+      ? runOpenCode(prompt, sessionId, config, callbacks)
+      : runCodex(prompt, sessionId, config, callbacks);
 }

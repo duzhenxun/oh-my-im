@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   startDashboard,
+  isOpenCodeModelAllowed,
+  isPiModelAllowed,
   normalizeAgentModel,
   type DashboardConfig,
   type DashboardStatus,
@@ -36,6 +38,11 @@ const processPaths: Record<string, string> = { "group-worker": join(workerDir, "
 const packageFile = join(new URL(".", import.meta.url).pathname, "..", "package.json");
 const repliesDir = join(dataDir, "replies");
 
+interface AgentModelList {
+  models: string[];
+  defaultModel?: string;
+}
+
 const defaultConfig = (): DashboardConfig => ({
   privateChatEnabled: false,
   responseMode: "card",
@@ -48,9 +55,9 @@ const defaultConfig = (): DashboardConfig => ({
   webhookUrl: "",
   targets: [], botAllowedUserIds: [], botAllowedUserNames: {},
   botSuperAdminUserIds: [], botSuperAdminUserNames: {}, robotSenderOpenDingTalkId: "",
-  commandKeywords: { pause: [], monitorOpen: [], monitorStop: [], switchPi: [], switchCodex: [] },
+  commandKeywords: { pause: [], monitorOpen: [], monitorStop: [], switchPi: [], switchCodex: [], switchOpencode: [] },
   groupPromptSuffix: "", replyFormat: "markdown", robotName: "AI Agent",
-  clientId: "", clientSecret: "", agentModels: { codex: "", pi: "" }, agent: "codex",
+  clientId: "", clientSecret: "", agentModels: { codex: "", pi: "", opencode: "" }, agent: "codex",
 });
 
 async function loadConfig(): Promise<DashboardConfig> {
@@ -182,11 +189,20 @@ async function restartSystem(): Promise<void> {
   child.unref();
 }
 
-async function listAgentModels(agent: "codex" | "pi"): Promise<string[]> {
-  const command = agent === "pi" ? "pi" : "codex";
-  const result = spawnSync(command, ["--list-models"], { encoding: "utf8", timeout: 20_000 });
+function externalCliEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  if (env.PATH) {
+    env.PATH = env.PATH.split(":").filter((entry) => !entry.endsWith("/node_modules/.bin")).join(":");
+  }
+  return env;
+}
+
+async function listAgentModels(agent: "codex" | "pi" | "opencode"): Promise<AgentModelList> {
+  const command = agent === "pi" ? "pi" : agent === "opencode" ? "opencode" : "codex";
+  const args = agent === "opencode" ? ["models"] : ["--list-models"];
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 20_000, env: agent === "opencode" ? externalCliEnv() : process.env });
   if (result.error || result.status !== 0) {
-    if (agent === "codex") return ["默认模型（不指定）"];
+    if (agent === "codex") return { models: ["默认模型（不指定）"] };
     throw new Error(result.stderr?.trim() || result.error?.message || `${command} 模型列表查询失败`);
   }
   const lines = String(result.stdout || "").split(/\r?\n/).map((line) => line.trim());
@@ -196,7 +212,24 @@ async function listAgentModels(agent: "codex" | "pi"): Promise<string[]> {
       return match && match[1] !== "provider" ? [`${match[1]}/${match[2]}`] : [];
     })
     : lines.filter((line) => line && !/^[-= ]+$/.test(line) && !/^available models/i.test(line));
-  return [...new Set(models)];
+  if (agent === "pi") return { models: [...new Set(models.filter(isPiModelAllowed))] };
+  if (agent !== "opencode") return { models: [...new Set(models)] };
+
+  let defaultModel: string | undefined;
+  const configResult = spawnSync(command, ["debug", "config"], {
+    encoding: "utf8",
+    timeout: 20_000,
+    env: externalCliEnv(),
+  });
+  if (configResult.status === 0) {
+    try {
+      const resolvedConfig = JSON.parse(String(configResult.stdout || "")) as { model?: unknown };
+      if (typeof resolvedConfig.model === "string" && resolvedConfig.model.trim()) defaultModel = resolvedConfig.model.trim();
+    } catch { /* model list remains usable if debug output changes */ }
+  }
+  const filteredModels = models.filter((model) => isOpenCodeModelAllowed(model));
+  if (defaultModel && !isOpenCodeModelAllowed(defaultModel)) defaultModel = undefined;
+  return { models: [...new Set(defaultModel ? [defaultModel, ...filteredModels] : filteredModels)], defaultModel };
 }
 
 async function botStatus(): Promise<{ enabled: boolean; connected: boolean; updatedAt?: string }> {

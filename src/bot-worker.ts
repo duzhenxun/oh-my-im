@@ -3,8 +3,8 @@ import { open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { runApp } from "./bot-app.js";
-import type { Config } from "./config.js";
-import { normalizeAgentModel, type AgentModels, type CommandKeywordsConfig } from "./dws-dashboard.js";
+import { resolveAgentModel, type Config } from "./config.js";
+import { type AgentModels, type CommandKeywordsConfig } from "./dws-dashboard.js";
 
 const stateDir = join(homedir(), ".oh-my-im");
 const dashboardConfigFile = join(stateDir, "dws-dashboard.json");
@@ -18,7 +18,7 @@ interface DashboardCredentials {
   botAllowedUserIds?: string[];
   botSuperAdminUserIds?: string[];
   targets?: Array<{ senderId?: string }>;
-  agent?: "codex" | "pi";
+  agent?: "codex" | "pi" | "opencode";
   agentModels?: Partial<AgentModels>;
   agentModel?: string;
   botAllowedUserNames?: Record<string, string>;
@@ -78,14 +78,16 @@ function loadBotConfig(): Config {
     codexWorkDir: defaultWorkDir,
     agentModels: {
       codex: "",
-      pi: normalizeAgentModel("pi", credentials.agentModels?.pi?.trim() || (credentials.agent === "pi" ? credentials.agentModel?.trim() || "" : "")),
+      pi: resolveAgentModel("pi", credentials.agentModels, credentials.agent, credentials.agentModel) || "",
+      opencode: resolveAgentModel("opencode", credentials.agentModels, credentials.agent, credentials.agentModel) || "",
     },
-    agentModel: credentials.agent === "pi"
-      ? (credentials.agentModels?.pi || credentials.agentModel)?.trim() || undefined
+    agentModel: credentials.agent === "pi" || credentials.agent === "opencode"
+      ? resolveAgentModel(credentials.agent, credentials.agentModels, credentials.agent, credentials.agentModel)
       : undefined,
     codexPermissionMode: "bypass",
+    opencodeCliPath: process.env.OPENCODE_CLI_PATH?.trim() || "opencode",
     piCliPath: process.env.PI_CLI_PATH?.trim() || "pi",
-    agent: credentials.agent === "pi" ? "pi" : "codex",
+    agent: credentials.agent === "pi" || credentials.agent === "opencode" ? credentials.agent : "codex",
     allowedUserIds,
     cliTimeoutMs: 30 * 60 * 1000,
   };
@@ -131,7 +133,7 @@ try {
     getAgent: () => {
       try {
         const current = JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials;
-        return current.agent === "pi" ? "pi" : "codex";
+        return current.agent === "pi" || current.agent === "opencode" ? current.agent : "codex";
       } catch {
         return config.agent;
       }
@@ -140,7 +142,9 @@ try {
       if (agent === "codex") return undefined;
       try {
         const current = JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials;
-        return normalizeAgentModel(agent, current.agentModels?.[agent]?.trim() || (current.agent === agent ? current.agentModel?.trim() : undefined) || undefined) || undefined;
+        const model = resolveAgentModel(agent, current.agentModels, current.agent, current.agentModel);
+        console.log(`[OmiBot] live agent model agent=${agent} model=${model || "<cli-default>"}`);
+        return model;
       } catch {
         return config.agentModels[agent] || undefined;
       }
@@ -164,7 +168,7 @@ try {
     getCommandKeywords: () => {
       try {
         const current = JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials;
-        return current.commandKeywords ?? { pause: [], monitorOpen: [], monitorStop: [], switchPi: [], switchCodex: [] };
+        return current.commandKeywords ?? { pause: [], monitorOpen: [], monitorStop: [], switchPi: [], switchCodex: [], switchOpencode: [] };
       } catch {
         return undefined;
       }

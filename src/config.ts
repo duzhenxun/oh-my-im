@@ -2,12 +2,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { normalizeAgentModel, type AgentModels } from "./dws-dashboard.js";
 
-export type AgentType = "codex" | "pi";
+export type AgentType = "codex" | "pi" | "opencode";
 
 export interface Config {
   dingtalkClientId: string;
   dingtalkClientSecret: string;
   codexCliPath: string;
+  opencodeCliPath?: string;
   codexWorkDir: string;
   agentModels: AgentModels;
   codexModel?: string;
@@ -27,6 +28,16 @@ interface LocalBotConfig {
   agent?: AgentType;
   agentModels?: Partial<AgentModels>;
   agentModel?: string;
+}
+
+export function resolveAgentModel(
+  agent: AgentType,
+  agentModels: Partial<AgentModels> | undefined,
+  activeAgent: AgentType | undefined,
+  legacyModel: string | undefined,
+): string | undefined {
+  const configured = agentModels?.[agent]?.trim() || (activeAgent === agent ? legacyModel?.trim() : "") || "";
+  return normalizeAgentModel(agent, configured) || undefined;
 }
 
 function loadLocalBotConfig(): LocalBotConfig {
@@ -56,14 +67,16 @@ export function loadConfig(): Config {
     codexWorkDir: resolveWorkDir(),
     agentModels: {
       codex: "",
-      pi: normalizeAgentModel("pi", local.agentModels?.pi?.trim() || (local.agent === "pi" ? local.agentModel?.trim() || "" : "")),
+      pi: resolveAgentModel("pi", local.agentModels, local.agent, local.agentModel) || "",
+      opencode: resolveAgentModel("opencode", local.agentModels, local.agent, local.agentModel) || "",
     },
-    agentModel: local.agent === "pi"
-      ? (local.agentModels?.pi || local.agentModel)?.trim() || undefined
+    agentModel: local.agent === "pi" || local.agent === "opencode"
+      ? resolveAgentModel(local.agent, local.agentModels, local.agent, local.agentModel)
       : undefined,
     codexPermissionMode: "bypass",
+    opencodeCliPath: process.env.OPENCODE_CLI_PATH?.trim() || "opencode",
     piCliPath: process.env.PI_CLI_PATH?.trim() || "pi",
-    agent: local.agent === "pi" ? "pi" : "codex",
+    agent: local.agent === "pi" || local.agent === "opencode" ? local.agent : "codex",
     allowedUserIds: [...new Set((local.botAllowedUserIds ?? []).map((id) => id.trim()).filter(Boolean))],
     cliTimeoutMs: 30 * 60 * 1000,
   };

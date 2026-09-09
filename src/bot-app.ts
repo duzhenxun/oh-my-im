@@ -19,6 +19,7 @@ interface SessionDirectory {
   cwd: string;
   piCount: number;
   codexCount: number;
+  opencodeCount: number;
   updatedAt?: string;
 }
 
@@ -62,6 +63,7 @@ function savePrivateSessions(): void {
 function clearPrivateSessionBindings(conversationId: string): void {
   privateSessionBindings.delete(privateSessionKey(conversationId, "pi"));
   privateSessionBindings.delete(privateSessionKey(conversationId, "codex"));
+  privateSessionBindings.delete(privateSessionKey(conversationId, "opencode"));
   savePrivateSessions();
 }
 
@@ -95,7 +97,7 @@ function getState(
     defaultWorkDir,
     sessions: {}, selectedSessions: {}, visibleSessionLists: {}, pendingMessages: [], pendingNoticeSent: false, busy: false,
   };
-  (['codex', 'pi'] as const).forEach((agent) => {
+  (['codex', 'pi', 'opencode'] as const).forEach((agent) => {
     const sessionId = privateSessionBindings.get(privateSessionKey(conversationId, agent));
     if (sessionId) created.sessions[agent] = sessionId;
   });
@@ -121,19 +123,21 @@ function formatSessionTime(value?: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
 }
 
-function buildAdminDirectories(piSessions: AgentSessionInfo[], codexSessions: AgentSessionInfo[]): SessionDirectory[] {
+function buildAdminDirectories(piSessions: AgentSessionInfo[], codexSessions: AgentSessionInfo[], opencodeSessions: AgentSessionInfo[]): SessionDirectory[] {
   const directories = new Map<string, SessionDirectory>();
   const append = (agent: Config["agent"], session: AgentSessionInfo) => {
     if (!session.cwd) return;
-    const current = directories.get(session.cwd) ?? { cwd: session.cwd, piCount: 0, codexCount: 0 };
+    const current = directories.get(session.cwd) ?? { cwd: session.cwd, piCount: 0, codexCount: 0, opencodeCount: 0 };
     if (agent === "pi") current.piCount += 1;
-    else current.codexCount += 1;
+    else if (agent === "codex") current.codexCount += 1;
+    else current.opencodeCount += 1;
     const timestamp = session.updatedAt ?? session.createdAt;
     if ((timestamp ?? "") > (current.updatedAt ?? "")) current.updatedAt = timestamp;
     directories.set(session.cwd, current);
   };
   piSessions.forEach((session) => append("pi", session));
   codexSessions.forEach((session) => append("codex", session));
+  opencodeSessions.forEach((session) => append("opencode", session));
   return [...directories.values()].sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
 }
 
@@ -143,7 +147,7 @@ function formatAdminDirectories(directories: SessionDirectory[]): string {
     `超级管理员 Session 目录（共 ${directories.length} 个）：`,
     ...directories.slice(0, 30).map((directory, index) => [
       `${index + 1}. ${directory.cwd}`,
-      `   Pi: ${directory.piCount} · Codex: ${directory.codexCount} · 最近: ${formatSessionTime(directory.updatedAt)}`,
+      `   Pi: ${directory.piCount} · Codex: ${directory.codexCount} · OpenCode: ${directory.opencodeCount} · 最近: ${formatSessionTime(directory.updatedAt)}`,
     ].join("\n")),
     directories.length > 30 ? `仅显示最近 30 个目录，共 ${directories.length} 个。` : "",
     "",
@@ -273,15 +277,15 @@ async function handleCommand(
       "oh-my-im commands:",
       "/help - 查看帮助",
       "/status - 查看运行状态",
-      "/sessions [pi|codex] - 默认查看当前 Agent 的 sessions，也可指定 Agent",
-      "/use <pi|codex> <编号或sessionId> - 切换当前私有目录下的 session",
+      "/sessions [pi|codex|opencode] - 默认查看当前 Agent 的 sessions，也可指定 Agent",
+      "/use <pi|codex|opencode> <编号或sessionId> - 切换当前私有目录下的 session",
       "/current - 查看当前 Agent session 和工作路径",
-      "/new - 清空当前会话的 Codex/Pi session",
+        "/new - 清空当前会话的 Codex/Pi/OpenCode session",
       ...(isSuperAdmin ? [
         "/admin-sessions - 查看本机全部 Session 目录",
         "/admin-cd <目录编号> - 选择管理员工作目录",
-        "/admin-sessions <pi|codex> - 查看所选目录的 sessions",
-        "/admin-use <pi|codex> <编号或sessionId> - 切换管理员 session",
+        "/admin-sessions <pi|codex|opencode> - 查看所选目录的 sessions",
+        "/admin-use <pi|codex|opencode> <编号或sessionId> - 切换管理员 session",
         "/admin-current - 查看管理员当前绑定",
         "/admin-reset - 返回自己的私有目录",
       ] : []),
@@ -295,7 +299,7 @@ async function handleCommand(
       return true;
     }
     const requested = text.split(/\s+/)[1]?.toLowerCase();
-    const agents: Config["agent"][] = requested === "pi" || requested === "codex"
+    const agents: Config["agent"][] = requested === "pi" || requested === "codex" || requested === "opencode"
       ? [requested]
       : [config.agent];
     const sections: string[] = [];
@@ -319,8 +323,8 @@ async function handleCommand(
     }
     const [, rawAgent, selector] = text.split(/\s+/, 3);
     const agent = rawAgent?.toLowerCase();
-    if ((agent !== "pi" && agent !== "codex") || !selector) {
-      await bot.sendText(message.conversationId, "用法：/use <pi|codex> <编号或sessionId>");
+    if ((agent !== "pi" && agent !== "codex" && agent !== "opencode") || !selector) {
+      await bot.sendText(message.conversationId, "用法：/use <pi|codex|opencode> <编号或sessionId>");
       return true;
     }
     const sessions = state.visibleSessionLists[agent] ?? (await listAgentSessions(agent, config))
@@ -360,11 +364,11 @@ async function handleCommand(
       return true;
     }
     const requested = text.split(/\s+/)[1]?.toLowerCase();
-    if (requested !== "pi" && requested !== "codex") {
-      const [piSessions, codexSessions] = await Promise.all([
-        listAgentSessions("pi", config), listAgentSessions("codex", config),
+    if (requested !== "pi" && requested !== "codex" && requested !== "opencode") {
+      const [piSessions, codexSessions, opencodeSessions] = await Promise.all([
+        listAgentSessions("pi", config), listAgentSessions("codex", config), listAgentSessions("opencode", config),
       ]);
-      state.adminDirectories = buildAdminDirectories(piSessions, codexSessions);
+      state.adminDirectories = buildAdminDirectories(piSessions, codexSessions, opencodeSessions);
       await bot.sendText(message.conversationId, formatAdminDirectories(state.adminDirectories));
       return true;
     }
@@ -405,7 +409,8 @@ async function handleCommand(
       "管理员工作目录已切换：", directory.cwd,
       `Pi Sessions: ${directory.piCount}`,
       `Codex Sessions: ${directory.codexCount}`,
-      "查看：/admin-sessions pi 或 /admin-sessions codex",
+      `OpenCode Sessions: ${directory.opencodeCount}`,
+      "查看：/admin-sessions pi、/admin-sessions codex 或 /admin-sessions opencode",
     ].join("\n"));
     return true;
   }
@@ -421,8 +426,8 @@ async function handleCommand(
     }
     const [, rawAgent, selector] = text.split(/\s+/, 3);
     const agent = rawAgent?.toLowerCase();
-    if ((agent !== "pi" && agent !== "codex") || !selector || !state.adminWorkDir) {
-      await bot.sendText(message.conversationId, "用法：先 /admin-cd <目录编号>，再 /admin-use <pi|codex> <编号或sessionId>");
+    if ((agent !== "pi" && agent !== "codex" && agent !== "opencode") || !selector || !state.adminWorkDir) {
+      await bot.sendText(message.conversationId, "用法：先 /admin-cd <目录编号>，再 /admin-use <pi|codex|opencode> <编号或sessionId>");
       return true;
     }
     const sessions = state.visibleSessionLists[agent] ?? (await listAgentSessions(agent, config))
@@ -640,8 +645,8 @@ export async function runApp(
     const currentConfig = {
       ...config,
       agent: selectedAgent,
-      agentModel: selectedAgent === "pi"
-        ? options.getAgentModel?.(selectedAgent) ?? (config.agentModels.pi || undefined)
+      agentModel: selectedAgent !== "codex"
+        ? options.getAgentModel?.(selectedAgent) ?? (config.agentModels[selectedAgent] || undefined)
         : undefined,
     };
     if (message.msgtype === "text" && await handleCommand(
@@ -654,8 +659,8 @@ export async function runApp(
         await bot.sendText(message.conversationId, steered
           ? "[灵感]已将这条消息作为引导发送给当前 Pi 任务。"
           : "当前 Pi 任务暂时无法接收引导，消息已排队等待处理。" );
-      } else if (state.activeAgent === "codex" && text) {
-        // Codex runs one exec process per turn. Collect follow-up messages and
+      } else if ((state.activeAgent === "codex" || state.activeAgent === "opencode") && text) {
+        // Codex and OpenCode run one CLI process per turn. Collect follow-up messages and
         // replay them as one combined prompt after the current turn completes.
         state.pendingMessages.push(message);
         state.pendingNoticeSent = true;
@@ -675,10 +680,14 @@ export async function runApp(
     state.activeAgent = selectedAgent;
     const taskToken = `${message.conversationId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     state.steerTaskToken = taskToken;
-    const modelName = selectedAgent === "pi"
-      ? shortModelName(options.getAgentModel?.(selectedAgent) ?? config.agentModels.pi)
+    const modelName = selectedAgent !== "codex"
+      ? shortModelName(options.getAgentModel?.(selectedAgent) ?? config.agentModels[selectedAgent])
       : "";
-    const label = `${agentLabel(selectedAgent)}${modelName ? ` ${modelName}` : " Agent"}`;
+    const label = `${agentLabel(selectedAgent)} Agent`;
+    const processingLabel = selectedAgent === "codex"
+      ? `${agentLabel(selectedAgent)} Agent`
+      : `${agentLabel(selectedAgent)} ${modelName || "默认模型"}`;
+    const processingMessage = `[OMG] ${processingLabel} 正在分析...`;
     const taskStartedAt = Date.now();
     const formatElapsed = () => {
       const totalSeconds = Math.max(0, Math.floor((Date.now() - taskStartedAt) / 1000));
@@ -700,11 +709,11 @@ export async function runApp(
     const finishedTitle = (icon: string, state: string) => `${icon} ${title}${state} 总耗时 ${formatElapsed()}`;
     const responseMode = options.getResponseMode?.() ?? "card";
     const reply = responseMode === "card"
-      ? await bot.sendThinkingCard(message, "[OMG] 正在分析...", processingTitle())
+      ? await bot.sendThinkingCard(message, processingMessage, processingTitle())
       : { conversationId: message.conversationId, mode: "text" as const };
-    if (responseMode === "text") await bot.sendText(message.conversationId, "[OMG] 正在分析...");
+    if (responseMode === "text") await bot.sendText(message.conversationId, processingMessage);
     let elapsedTimer: ReturnType<typeof setInterval> | undefined;
-    let latestCardContent = "[OMG] 正在分析...";
+    let latestCardContent = processingMessage;
     const agent = selectedAgent;
     let prompt = "";
 
@@ -807,7 +816,7 @@ export async function runApp(
         savePrivateSessions();
       }
       const toolCount = Object.values(result.toolStats).reduce((total, count) => total + count, 0);
-      const note = `处理详情 · 1 条消息 · ${toolCount} 次工具调用`;
+      const note = `[夯爆了] ${modelName || "默认模型"} 1条消息 ${toolCount}次工具`;
       const finalContent = buildCardContent(result.text, options.getShowProcessingDetails?.() === true ? note : undefined);
       if (responseMode === "card") await bot.updateReply(reply, finishedTitle("✅", "完成"), finalContent);
       else await bot.sendText(message.conversationId, result.text.trim() || "(无输出)");

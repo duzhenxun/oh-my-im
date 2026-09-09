@@ -210,6 +210,10 @@ function runPiOnce(
     });
     child.on("close", (code) => {
       if (completed) return;
+      if (stderr && /Session found in different project|Fork this session\?/i.test(stderr)) {
+        fail(stderr.trim());
+        return;
+      }
       if (code && code !== 0) {
         fail(stderr.trim() || `Pi Agent exited with code ${code}`);
         return;
@@ -225,6 +229,10 @@ function isMissingSessionError(error: unknown): boolean {
   return error instanceof Error && /No session found matching ['"]?[^'"\s]+['"]?/i.test(error.message);
 }
 
+function isDifferentProjectError(error: unknown): boolean {
+  return error instanceof Error && /Session found in different project|Fork this session\?/i.test(error.message);
+}
+
 export async function runPi(
   prompt: string,
   sessionId: string | undefined,
@@ -234,8 +242,8 @@ export async function runPi(
   try {
     return await runPiOnce(prompt, sessionId, config, callbacks);
   } catch (error) {
-    if (!sessionId || !isMissingSessionError(error)) throw error;
-    log.warn(`session=${sessionId} was not found; starting a new Pi session`);
+    if (!sessionId || (!isMissingSessionError(error) && !isDifferentProjectError(error))) throw error;
+    log.warn(`session=${sessionId} is unavailable for the current project; starting a new Pi session`);
     return runPiOnce(prompt, undefined, config, callbacks);
   }
 }

@@ -1,6 +1,6 @@
 # oh-my-im
 
-`oh-my-im` 是一个运行在本机的钉钉 AI Agent 桥接器。它接收钉钉单聊和配置群中的消息，调用本机的 [Codex CLI](https://github.com/openai/codex) 或 [Pi](https://github.com/badlogic/pi-mono)，再通过钉钉文本或互动卡片返回结果。
+`oh-my-im` 是一个运行在本机的钉钉 AI Agent 桥接器。它接收钉钉单聊和配置群中的消息，调用本机的 [Codex CLI](https://github.com/openai/codex)、[Pi](https://github.com/badlogic/pi-mono) 或 [OpenCode](https://opencode.ai/)，再通过钉钉文本或互动卡片返回结果。
 
 项目是一个 TypeScript/Node.js 应用，不使用数据库、Redis 或 Docker。配置、运行状态、日志和回复历史默认保存在当前用户的 `~/.oh-my-im/` 目录。
 
@@ -8,8 +8,8 @@
 
 - 单聊机器人：按用户白名单接收钉钉单聊，支持文本、图片、文件、语音等可解析消息。
 - 群消息监听：消费 DWS 全群消息事件，再按“群 + 发送人”规则做本地过滤。
-- Agent 切换：在管理页选择 Codex 或 Pi，也可以在会话中使用已配置的关键词切换。
-- Agent 模型：管理页仅配置 Pi 默认模型；Codex 始终使用系统 Codex CLI 已设置的默认模型。
+- Agent 切换：在管理页选择 Codex、Pi 或 OpenCode，也可以在会话中使用已配置的关键词切换。
+- Agent 模型：管理页可分别配置 Pi 和 OpenCode 模型；Codex 始终使用系统 Codex CLI 已设置的默认模型。
 - 回复方式：在管理页选择互动卡片或普通文本；该设置同时作用于群聊和私聊。普通文本模式只发送 Agent 最终结果。
 - 互动卡片：显示处理中、工具调用和最终回复；群聊支持 Markdown 或纯文本格式。
 - Session 管理：单聊用户只能查看和切换自己工作目录下的 Session；超级管理员可管理其他工作目录。
@@ -94,13 +94,14 @@ http://127.0.0.1:12525
 
 ### Agent 模型
 
-管理页仅展示 Pi 的模型选择：
+管理页展示 Pi 和 OpenCode 的模型选择：
 
 ```text
 Pi 默认模型   -> 所有使用 Pi 的群聊和单聊
+OpenCode 默认模型 -> 所有使用 OpenCode 的群聊和单聊
 ```
 
-Codex 始终不会传递 `--model`，也不读取 Web 后台或系统变量中的模型值，由 Codex CLI 自己决定默认模型。Pi 的模型列表通过 `pi --list-models` 获取；如果 Pi CLI 暂不可用，可以先完成 CLI 登录或直接保留默认模型。
+Codex 始终不会传递 `--model`，也不读取 Web 后台或系统变量中的模型值，由 Codex CLI 自己决定默认模型。Pi 的模型列表通过 `pi --list-models` 获取，OpenCode 的模型列表通过 `opencode models` 获取；如果对应 CLI 暂不可用，可以先完成 CLI 登录或直接保留默认模型。
 
 ## `omi` 命令
 
@@ -155,8 +156,8 @@ omi
 ```text
 /help
 /status
-/sessions [pi|codex]
-/use <pi|codex> <编号或 sessionId>
+/sessions [pi|codex|opencode]
+/use <pi|codex|opencode> <编号或 sessionId>
 /current
 /new                       # 清空当前会话的 Agent session，下一条消息使用新会话
 ```
@@ -164,9 +165,9 @@ omi
 Session 超级管理员额外拥有：
 
 ```text
-/admin-sessions [pi|codex]
+/admin-sessions [pi|codex|opencode]
 /admin-cd <目录编号或路径>
-/admin-use <pi|codex> <编号或 sessionId>
+/admin-use <pi|codex|opencode> <编号或 sessionId>
 /admin-current
 /admin-reset
 ```
@@ -190,6 +191,7 @@ Session 超级管理员额外拥有：
 | `DWS_CLI_PATH` | `dws` | DWS CLI 路径 |
 | `CODEX_CLI_PATH` | `codex` | 群侧 Codex CLI 路径 |
 | `PI_CLI_PATH` | `pi` | Pi CLI 路径 |
+| `OPENCODE_CLI_PATH` | `opencode` | OpenCode CLI 路径 |
 | `DWS_CODEX_MODEL` | 不使用 | 不读取；Codex 使用系统 CLI 默认模型 |
 | `DWS_CODEX_TIMEOUT_MS` | `300000` | 群侧 Codex 超时，单位毫秒 |
 | `CODEX_PROXY` | 未设置 | 传给 Agent 的代理配置 |
@@ -197,7 +199,7 @@ Session 超级管理员额外拥有：
 | `PI_CODING_AGENT_SESSION_DIR` | `~/.pi/agent/sessions` | Pi Session 根目录 |
 | `OHMIM_DATA_DIR` | `~/.oh-my-im` | 回复历史目录使用的数据根目录 |
 
-模型来源：Codex 使用系统 CLI 默认模型，Pi 使用 Web 中的 Pi 配置；Pi 未配置模型时使用 Pi CLI 默认模型。
+模型来源：Codex 使用系统 CLI 默认模型，Pi 和 OpenCode 使用 Web 中各自的模型配置；未配置时分别使用对应 CLI 默认模型。OpenCode 模型列表来自 `opencode models`，保存值格式为 `provider/model`。
 
 当前实现默认以 bypass/full approval 方式运行 Agent。请只在可信的本地工作目录中使用，并确保 Agent 运行账号拥有合适的文件权限。
 
@@ -294,7 +296,7 @@ src/
 ├── dingtalk.ts            # Stream 单聊消息解析与发送
 ├── dingtalk-card.ts       # StandardCard 创建和更新
 ├── dingtalk-robot.ts      # 钉钉机器人 OpenAPI/Webhook
-├── agents/                # Codex/Pi 进程适配
+├── agents/                # Codex/Pi/OpenCode 进程适配
 └── conversation-log.ts    # 回复历史持久化
 ```
 

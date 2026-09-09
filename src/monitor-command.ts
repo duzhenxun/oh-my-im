@@ -34,12 +34,13 @@ function parseAgentSwitch(
     const normalizedKeyword = normalizeKeyword(keyword);
     // A bare model name is only a command when it is the whole message.
     // Otherwise bot replies such as "当前已切换到 Pi" would trigger again.
-    return normalizedKeyword === "pi" || normalizedKeyword === "codex"
+    return normalizedKeyword === "pi" || normalizedKeyword === "codex" || normalizedKeyword === "opencode"
       ? normalized === normalizedKeyword
       : normalized.includes(normalizedKeyword);
   };
   if ((keywords.switchPi ?? []).some(matchesKeyword)) matches.push("pi");
   if ((keywords.switchCodex ?? []).some(matchesKeyword)) matches.push("codex");
+  if ((keywords.switchOpencode ?? []).some(matchesKeyword)) matches.push("opencode");
   if (matches.length !== 1) return undefined;
   return { type: "switch-agent", agent: matches[0] };
 }
