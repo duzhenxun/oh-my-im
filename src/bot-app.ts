@@ -779,7 +779,10 @@ export async function runApp(
 
       prompt = await buildCodexPrompt(bot, message, state.selectedSessions[agent]?.cwd ?? state.defaultWorkDir);
       const selectedSession = state.selectedSessions[agent];
-      const agentConfig = { ...config, codexWorkDir: selectedSession?.cwd ?? state.defaultWorkDir };
+      // Carry the per-conversation Agent and model selection into execution.
+      // Using the startup config here can leak the default agent's model into
+      // a private conversation after the user switches Agent.
+      const agentConfig = { ...currentConfig, codexWorkDir: selectedSession?.cwd ?? state.defaultWorkDir };
       const result = await runAgent(agent, prompt, state.sessions[agent], agentConfig, {
         onAbortReady: (abort) => { state.abort = abort; },
         onSteerReady: (steer) => {

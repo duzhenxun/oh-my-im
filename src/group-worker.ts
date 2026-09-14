@@ -41,14 +41,6 @@ import { startPersonalHistoryPolling } from "./dws-history.js";
 
 const log = createLogger("group-worker");
 
-async function sendDwsFallbackText(openConversationId: string, content: string): Promise<void> {
-  // DWS message sending must target the exact openConversationId from the
-  // incoming group event. Do not use a group name or the configured target's
-  // display value here.
-  const result = await runDwsJson<{ success?: boolean; failedCount?: number }>(["chat", "message", "send", "--conversation-id", openConversationId, "--text", content, "--yes"]);
-  if (result.success === false || (result.failedCount ?? 0) > 0) throw new Error("DWS 失败原因通知发送失败");
-}
-
 function notifyGroupFailure(groupId: string, context: string, err: unknown, config?: DashboardConfig): void {
   const reason = err instanceof Error ? err.message : String(err);
   const message = `AI 处理失败：${context}\n群：${groupId}\n失败原因：${reason.slice(0, 1_500)}`;
@@ -1395,8 +1387,7 @@ function startGroupListener(
               if (!currentConfig.clientId.trim()) {
                 const reason = "未配置钉钉应用 Client ID，无法确定要加入群的机器人";
                 log.warn(`ignored monitor open because client ID is missing group=${groupId}`);
-                await sendDwsFallbackText(groupId, `AI 能力开启失败：${reason}。\n请先在 Web 的“机器人与权限”中配置 Client ID，或手动将“${currentConfig.robotName}”加入本群。`)
-                  .catch((notifyErr) => log.error(`DWS failure notification failed group=${groupId}: ${String(notifyErr)}`));
+                log.warn(`AI capability open failed group=${groupId}: ${reason}; configure Client ID in the Web console or manually add robot=${currentConfig.robotName}`);
                 return;
               }
               const robotCode = currentConfig.clientId.trim();
@@ -1425,8 +1416,7 @@ function startGroupListener(
                 const guidance = /permission|denied|权限|forbidden|unauthorized/i.test(reason)
                   ? "当前 DWS 登录账号可能没有加机器人进群权限，请让群主/群管理员手动将配置机器人加入本群后，再重新发送打开指令。"
                   : "请确认 Client ID 和机器人配置是否正确；如果自动加入失败，请让群主/群管理员手动将配置机器人加入本群后，再重新发送打开指令。";
-                await sendDwsFallbackText(openConversationId, `AI 能力开启失败：配置机器人加入本群失败。\n失败原因：${reason}\n${guidance}`)
-                  .catch((notifyErr) => log.error(`DWS failure notification failed group=${groupId}: ${String(notifyErr)}`));
+                log.error(`AI capability open failed group=${groupId}: ${reason}; ${guidance}`);
                 return;
               }
             } else if (command === "stop") {
