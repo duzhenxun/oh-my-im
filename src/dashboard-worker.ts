@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-import { mkdir, open, readFile, stat, writeFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile, stat, writeFile, rename, chmod } from "node:fs/promises";
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 import { spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -37,6 +39,30 @@ const omiPath = join(workerDir, "omi.js");
 const processPaths: Record<string, string> = { "group-worker": join(workerDir, "group-worker.js"), bot: join(workerDir, "bot-worker.js") };
 const packageFile = join(new URL(".", import.meta.url).pathname, "..", "package.json");
 const repliesDir = join(dataDir, "replies");
+const passwordFile = join(dataDir, "dashboard-password.json");
+const scrypt = promisify(scryptCallback);
+const sessions = new Map<string, number>();
+const DEFAULT_PASSWORD = "5552123";
+
+type PasswordRecord = { salt: string; hash: string };
+async function passwordHash(password: string, salt = randomBytes(16).toString("hex")): Promise<PasswordRecord> {
+  const derived = await scrypt(password, salt, 64) as Buffer;
+  return { salt, hash: derived.toString("hex") };
+}
+async function loadPassword(): Promise<PasswordRecord> {
+  try { return JSON.parse(await readFile(passwordFile, "utf8")) as PasswordRecord; }
+  catch { const record = await passwordHash(DEFAULT_PASSWORD); await savePassword(record); return record; }
+}
+async function savePassword(record: PasswordRecord): Promise<void> {
+  await mkdir(dataDir, { recursive: true });
+  const temporary = `${passwordFile}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+  await chmod(temporary, 0o600);
+  await rename(temporary, passwordFile);
+}
+function cookieValue(request: import("node:http").IncomingMessage): string | undefined {
+  return request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith("omi_session="))?.slice("omi_session=".length);
+}
 
 interface AgentModelList {
   models: string[];
@@ -57,7 +83,7 @@ const defaultConfig = (): DashboardConfig => ({
   botSuperAdminUserIds: [], botSuperAdminUserNames: {}, robotSenderOpenDingTalkId: "",
   commandKeywords: { pause: [], monitorOpen: [], monitorStop: [], switchPi: [], switchCodex: [], switchOpencode: [] },
   groupPromptSuffix: "", replyFormat: "markdown", robotName: "AI Agent",
-  clientId: "", clientSecret: "", agentModels: { codex: "", pi: "", opencode: "" }, agent: "codex",
+  clientId: "", clientSecret: "", agentModels: { codex: "", pi: "", opencode: "" }, agent: "pi",
 });
 
 async function loadConfig(): Promise<DashboardConfig> {
@@ -264,6 +290,13 @@ async function main(): Promise<void> {
     void loadReplies().then((latest) => { replies = latest; }).catch(() => undefined);
   }, 1_000);
   replyReloadTimer.unref();
+  const password = await loadPassword();
+  const auth = {
+    isAuthenticated: (request: import("node:http").IncomingMessage) => { const token = cookieValue(request); const expires = token ? sessions.get(token) : undefined; return Boolean(expires && expires > Date.now()); },
+    login: async (candidate: string) => { const derived = await passwordHash(candidate, password.salt); const matches = derived.hash.length === password.hash.length && timingSafeEqual(Buffer.from(derived.hash, "hex"), Buffer.from(password.hash, "hex")); if (!matches) return null; const token = randomBytes(32).toString("base64url"); sessions.set(token, Date.now() + 8 * 60 * 60 * 1000); return token; },
+    logout: (request: import("node:http").IncomingMessage) => { const token = cookieValue(request); if (token) sessions.delete(token); },
+    changePassword: async (request: import("node:http").IncomingMessage, current: string, next: string) => { if (!auth.isAuthenticated(request)) return "未登录"; if (next.length < 8 || next.length > 200) return "新密码长度需为 8-200 位"; const currentHash = await passwordHash(current, password.salt); if (currentHash.hash.length !== password.hash.length || !timingSafeEqual(Buffer.from(currentHash.hash, "hex"), Buffer.from(password.hash, "hex"))) return "当前密码错误"; const record = await passwordHash(next); await savePassword(record); password.salt = record.salt; password.hash = record.hash; sessions.clear(); return null; },
+  };
   startDashboard(serverConfig.port, {
     getConfig: () => config,
     updateConfig: async (next) => {
@@ -279,7 +312,7 @@ async function main(): Promise<void> {
     getCurrentDwsUser: async () => ({ ...(await getCurrentDwsUser()), auth: await getDwsAuthStatus() }),
     getDwsAuthStatus, startDwsDeviceLogin, getDwsDeviceLoginOutput, logoutDws, getBotStatus: botStatus,
     getSystemStatus: systemStatus, getSystemLogs: systemLogs, restartSystem, controlSystemProcess, listAgentModels,
-  }, { host: serverConfig.host, version });
+  }, { host: serverConfig.host, version, auth });
   console.log(`[OmiDashboard] dashboard started at http://${serverConfig.host}:${serverConfig.port}`);
 }
 
