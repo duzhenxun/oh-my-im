@@ -38,7 +38,8 @@ interface ConversationState {
   steerTaskToken?: string;
   pendingMessages: DingTalkTextMessage[];
   pendingNoticeSent: boolean;
-  activeAgent?: Config["agent"]; 
+  activeAgent?: Config["agent"];
+  activeFingerprint?: string;
   paused?: boolean;
 }
 
@@ -542,8 +543,8 @@ export async function runApp(
   const config = configOverride ?? loadConfig();
   const bot = new DingTalkBot(config);
   const conversations = new Map<string, ConversationState>();
-  // Stream callbacks may be redelivered when the first callback is still
-  // running (we only ACK after onMessage completes). Without message-level
+  // Stream callbacks can still be redelivered when an ACK is lost, and DWS /
+  // history paths may surface the same content twice. Without message-level
   // deduplication, one user message can enter the busy branch again and emit
   // the misleading "后续消息" acknowledgement even though the user sent it
   // only once.
@@ -552,12 +553,15 @@ export async function runApp(
   const handledMessageFingerprints = new Map<string, number>();
   const messageFingerprintTtlMs = 15_000;
 
-  async function handleMessage(message: DingTalkTextMessage): Promise<void> {
+  // `replay` marks an internally replayed queue batch: its callback id and
+  // fingerprint were already registered when the messages first arrived, so
+  // deduplication must be skipped or the queued follow-ups would be dropped.
+  async function handleMessage(message: DingTalkTextMessage, replay = false): Promise<void> {
     if (options.getPrivateChatEnabled?.() === false) {
       log.info(`ignored private message while private chat is disabled conversation=${message.conversationId}`);
       return;
     }
-    if (message.callbackId?.trim()) {
+    if (!replay && message.callbackId?.trim()) {
       const callbackId = message.callbackId.trim();
       if (handledCallbackIds.has(callbackId)) {
         log.warn(`ignored duplicate DingTalk callback callbackId=${callbackId} conversation=${message.conversationId} text=${JSON.stringify(message.text.slice(0, 120))}`);
@@ -576,14 +580,16 @@ export async function runApp(
       message.attachments.map((attachment) => `${attachment.type}:${attachment.downloadCode}`).join(","),
     ].join("\u0000");
     const now = Date.now();
-    const previousMessageAt = handledMessageFingerprints.get(messageFingerprint);
-    if (previousMessageAt !== undefined && now - previousMessageAt < messageFingerprintTtlMs) {
-      log.warn(`ignored duplicate DingTalk message fingerprint conversation=${message.conversationId} text=${JSON.stringify(message.text.slice(0, 120))}`);
-      return;
-    }
-    handledMessageFingerprints.set(messageFingerprint, now);
-    for (const [fingerprint, timestamp] of handledMessageFingerprints) {
-      if (now - timestamp >= messageFingerprintTtlMs) handledMessageFingerprints.delete(fingerprint);
+    if (!replay) {
+      const previousMessageAt = handledMessageFingerprints.get(messageFingerprint);
+      if (previousMessageAt !== undefined && now - previousMessageAt < messageFingerprintTtlMs) {
+        log.warn(`ignored duplicate DingTalk message fingerprint conversation=${message.conversationId} text=${JSON.stringify(message.text.slice(0, 120))}`);
+        return;
+      }
+      handledMessageFingerprints.set(messageFingerprint, now);
+      for (const [fingerprint, timestamp] of handledMessageFingerprints) {
+        if (now - timestamp >= messageFingerprintTtlMs) handledMessageFingerprints.delete(fingerprint);
+      }
     }
 
     log.info(
@@ -653,6 +659,13 @@ export async function runApp(
       bot, currentConfig, conversations, message, text, isSuperAdminUser,
     )) return;
     if (state.busy) {
+      // A redelivery of the message that started the running task must never
+      // be treated as a new user message (steered or queued). Callbacks are
+      // ACKed immediately now, but keep this guard in case an ACK is lost.
+      if (state.activeFingerprint && messageFingerprint === state.activeFingerprint) {
+        log.warn(`ignored duplicate of the in-flight task message conversation=${message.conversationId} text=${JSON.stringify(message.text.slice(0, 120))}`);
+        return;
+      }
       const steer = state.activeAgent === "pi" && state.busy && state.steer && state.steerTaskToken ? state.steer : undefined;
       if (steer && text) {
         const steered = steer(text);
@@ -678,6 +691,7 @@ export async function runApp(
     state.busy = true;
     state.paused = false;
     state.activeAgent = selectedAgent;
+    state.activeFingerprint = messageFingerprint;
     const taskToken = `${message.conversationId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     state.steerTaskToken = taskToken;
     const modelName = selectedAgent !== "codex"
@@ -890,6 +904,7 @@ export async function runApp(
       state.steer = undefined;
       state.steerTaskToken = undefined;
       state.activeAgent = undefined;
+      state.activeFingerprint = undefined;
       state.paused = false;
       const pending = state.pendingMessages.splice(0);
       state.pendingNoticeSent = false;
@@ -904,7 +919,7 @@ export async function runApp(
           text: pending.map((item) => item.text.trim()).filter(Boolean).join("\n"),
           attachments: [],
         };
-        void handleMessage(combined).catch((error) => log.error("queued private messages failed", error));
+        void handleMessage(combined, true).catch((error) => log.error("queued private messages failed", error));
       }
     }
   }
