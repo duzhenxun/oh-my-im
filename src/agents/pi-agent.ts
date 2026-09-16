@@ -107,6 +107,7 @@ function runPiOnce(
     let authoritativeText = "";
     let nextSessionId = sessionId;
     let stderr = "";
+    let lastAssistantError = "";
     const toolStats: Record<string, number> = {};
     const seenToolCalls = new Set<string>();
 
@@ -197,11 +198,26 @@ function runPiOnce(
         return;
       }
       if (event.type === "message_end") {
+        const message = asObject(event.message);
+        // pi reports model/auth failures as an assistant message with empty
+        // content and stopReason "error". Surface errorMessage at settle time
+        // instead of returning a bogus successful empty reply ("无输出").
+        if (message?.role === "assistant") {
+          lastAssistantError = message.stopReason === "error" && typeof message.errorMessage === "string"
+            ? message.errorMessage.trim()
+            : "";
+        }
         const text = extractAssistantText(event.message);
         if (text) authoritativeText = text;
         return;
       }
-      if (event.type === "agent_settled") finish();
+      if (event.type === "agent_settled") {
+        // agent_settled is emitted after retries are exhausted, so a pending
+        // assistant error here is terminal.
+        if (lastAssistantError) fail(lastAssistantError);
+        else finish();
+        return;
+      }
     });
 
     child.on("error", (err) => {
@@ -216,6 +232,10 @@ function runPiOnce(
       }
       if (code && code !== 0) {
         fail(stderr.trim() || `Pi Agent exited with code ${code}`);
+        return;
+      }
+      if (lastAssistantError) {
+        fail(lastAssistantError);
         return;
       }
       finish();
