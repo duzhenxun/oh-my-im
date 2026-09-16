@@ -237,12 +237,15 @@ export class DingTalkBot {
         `incoming conversation=${message.conversationId} msgtype=${message.msgtype} senderId=${message.senderId} senderStaffId=${message.senderStaffId ?? "<none>"} senderNick=${message.senderNick ?? "<none>"} conversationType=${message.conversationType ?? "<none>"} text=${JSON.stringify(message.text.slice(0, 200))} textLen=${message.text.length} attachments=${message.attachments.length} hasWebhook=${Boolean(message.sessionWebhook)} hasRobotCode=${Boolean(message.robotCode)}`,
       );
 
+      // ACK before running the handler. Agent turns take minutes, and
+      // DingTalk re-pushes callbacks that stay unacknowledged; a redelivered
+      // copy of the task-starting message used to re-enter the handler and
+      // was steered into the running task as a phantom user message.
+      this.ack(message.callbackId, { accepted: true });
       try {
         await onMessage(message);
-        this.ack(message.callbackId, { handled: true });
       } catch (err) {
         console.error("[DingTalk] message handling failed:", err);
-        this.ack(message.callbackId, { error: String(err) });
       }
     });
 
