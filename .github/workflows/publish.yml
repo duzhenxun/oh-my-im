@@ -1,9 +1,11 @@
 name: Publish Package
 
+# Manual only: tag pushes must not publish. Releases are published to npm by
+# hand, and the automatic run used to fail at the npm step because trusted
+# publishing is not configured. Tags still mark releases; run this workflow
+# from the Actions tab when you want CI to publish.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
   workflow_dispatch:
 
 permissions:
