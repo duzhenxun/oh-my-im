@@ -82,7 +82,9 @@ export interface DashboardAuth {
 
 export interface DashboardServerOptions {
   host?: string;
-  version?: string;
+  // A string is used as-is; a function is resolved per request so an in-place
+  // upgrade shows up without restarting the dashboard process.
+  version?: string | (() => string);
   auth: DashboardAuth;
 }
 
@@ -329,7 +331,8 @@ export function startDashboard(port: number, hooks: DashboardHooks, options: Das
     }
     if (request.method === "GET" && url.pathname === "/") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-      response.end(dashboardPage.replaceAll("__OMI_VERSION__", options.version ? `v${options.version.replace(/^v/i, "")}` : "unknown"));
+      const version = typeof options.version === "function" ? options.version() : options.version;
+      response.end(dashboardPage.replaceAll("__OMI_VERSION__", version ? `v${version.replace(/^v/i, "")}` : "unknown"));
       return;
     }
     if (request.method === "GET" && url.pathname === "/favicon.ico") {

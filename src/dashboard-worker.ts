@@ -27,6 +27,7 @@ import {
   searchUsers,
   searchBots,
 } from "./dws-client.js";
+import { readVersion } from "./version.js";
 
 const dataDir = join(homedir(), ".oh-my-im");
 const configFile = join(dataDir, "dws-dashboard.json");
@@ -37,7 +38,6 @@ const logFile = join(dataDir, "omi.log");
 const workerDir = dirname(fileURLToPath(import.meta.url));
 const omiPath = join(workerDir, "omi.js");
 const processPaths: Record<string, string> = { "group-worker": join(workerDir, "group-worker.js"), bot: join(workerDir, "bot-worker.js") };
-const packageFile = join(new URL(".", import.meta.url).pathname, "..", "package.json");
 const repliesDir = join(dataDir, "replies");
 const passwordFile = join(dataDir, "dashboard-password.json");
 const scrypt = promisify(scryptCallback);
@@ -348,9 +348,10 @@ async function botStatus(): Promise<{ enabled: boolean; connected: boolean; upda
 }
 
 async function main(): Promise<void> {
-  let version = "unknown";
-  try { version = (JSON.parse(await readFile(packageFile, "utf8")) as { version?: string }).version?.trim() || version; }
-  catch { /* package metadata is optional in development */ }
+  // Version comes from the single version module. Keep the version of the code
+  // that is actually running, and re-read the installed version per request so
+  // an in-place upgrade is reflected instead of being cached at startup.
+  const runningVersion = readVersion();
   // Do not create a partial config here. The group-worker process owns initialization and
   // migration; this process only reads it and writes complete configurations
   // submitted by the dashboard.
@@ -408,8 +409,15 @@ async function main(): Promise<void> {
     getCurrentDwsUser: async () => ({ ...(await getCurrentDwsUser()), auth: await getDwsAuthStatus() }),
     getDwsAuthStatus, startDwsDeviceLogin, getDwsDeviceLoginOutput, logoutDws, getBotStatus: botStatus,
     getSystemStatus: systemStatus, getSystemLogs: systemLogs, restartSystem, controlSystemProcess, listAgentModels,
-  }, { host: serverConfig.host, version, auth });
-  console.log(`[OmiDashboard] dashboard started at http://${serverConfig.host}:${serverConfig.port}`);
+  }, {
+    host: serverConfig.host,
+    version: () => {
+      const installed = readVersion();
+      return installed === runningVersion ? installed : `${installed}（运行中的进程仍为 v${runningVersion}，重启后生效）`;
+    },
+    auth,
+  });
+  console.log(`[OmiDashboard] dashboard started at http://${serverConfig.host}:${serverConfig.port} (v${runningVersion})`);
 }
 
 main().catch((err) => {

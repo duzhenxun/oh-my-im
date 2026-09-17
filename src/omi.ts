@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { readVersion } from "./version.js";
 
 type OmiMode = "bot" | "listen";
 
@@ -36,18 +37,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const groupWorkerPath = join(here, "group-worker.js");
 const botPath = join(here, "bot-worker.js");
 const dashboardPath = join(here, "dashboard-worker.js");
-const packageFile = join(here, "..", "package.json");
 const packageName = "oh-my-im";
 const repositoryUrl = "https://github.com/duzhenxun/oh-my-im";
-
-function localVersion(): string {
-  try {
-    const packageJson = JSON.parse(readFileSync(packageFile, "utf8")) as { version?: string };
-    return packageJson.version?.trim() || "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
 
 function compareVersions(left: string, right: string): number {
   const parse = (value: string) => value.replace(/^v/i, "").split(".").map((part) => Number.parseInt(part, 10) || 0);
@@ -57,7 +48,7 @@ function compareVersions(left: string, right: string): number {
 }
 
 async function checkForUpdate(): Promise<boolean> {
-  const current = localVersion();
+  const current = readVersion();
   try {
     const response = await fetch(`https://registry.npmjs.org/${packageName}/latest`, { signal: AbortSignal.timeout(3_000) });
     if (!response.ok) return true;
@@ -92,7 +83,7 @@ async function checkForUpdate(): Promise<boolean> {
 
 function printHelp(): void {
   console.log([
-    "omi - DingTalk agent manager",
+    `omi - DingTalk agent manager (v${readVersion()})`,
     "",
     "Commands:",
     "  omi            Start group listening and the one-to-one bot (default)",
@@ -103,6 +94,7 @@ function printHelp(): void {
     "  omi restart    Stop and start the current omi mode",
     "  omi status     Show mode, process state, dashboard address, and log path",
     "  omi update     Restart the current mode with the current built version",
+    "  omi -v         Show the version",
     "  omi -h         Show this help",
   ].join("\n"));
 }
@@ -233,7 +225,7 @@ function start(mode: OmiMode, workspace = launchWorkspace): void {
   }
   processes.push(startProcess("bot", botPath, workspace));
   writeState({ mode, startedAt: new Date().toISOString(), workspace, processes });
-  console.log(`omi started in ${mode === "listen" ? "group listening + one-to-one" : "one-to-one"} mode`);
+  console.log(`omi v${readVersion()} started in ${mode === "listen" ? "group listening + one-to-one" : "one-to-one"} mode`);
   console.log(`log: ${logFile}`);
 }
 
@@ -265,6 +257,7 @@ async function stop(): Promise<boolean> {
 }
 
 function status(): void {
+  console.log(`oh-my-im v${readVersion()}`);
   const current = readState();
   if (!current) {
     const listenerPid = unmanagedListenerPid();
@@ -283,14 +276,17 @@ function status(): void {
   console.log(`log: ${logFile}`);
 }
 
-if (args.includes("-h") || args.includes("--help") || command === "help") {
+if (args.includes("-v") || args.includes("--version")) {
+  console.log(`omi v${readVersion()}`);
+} else if (args.includes("-h") || args.includes("--help") || command === "help") {
   printHelp();
 } else if (command === "start" || command === "listen") {
   if (await checkForUpdate()) start(noListen ? "bot" : "listen");
 } else if (command === "stop") {
   await stop();
 } else if (command === "status") {
-  status();
+  // status is the command users run most, so surface available upgrades here too.
+  if (await checkForUpdate()) status();
 } else if (command === "restart") {
   if (await checkForUpdate()) {
     const current = readState();
