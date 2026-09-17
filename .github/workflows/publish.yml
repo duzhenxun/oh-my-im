@@ -6,7 +6,6 @@ name: Publish Package
 # from the Actions tab when you want CI to publish.
 on:
   workflow_dispatch:
-  workflow_dispatch:
 
 permissions:
   id-token: write
