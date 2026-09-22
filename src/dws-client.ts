@@ -59,6 +59,10 @@ interface DwsGroupMembersResponse {
 interface DwsGroupBotsResponse {
   bots?: Array<{ openBotId?: string; name?: string }>;
 }
+interface DwsGroupBotMembersResponse {
+  complete?: boolean; partial?: boolean;
+  bots?: Array<{ openDingtalkId?: string; openDingTalkId?: string; name?: string; openBotId?: string; robotCode?: string }>;
+}
 interface DwsOperationResponse { success?: boolean; ok?: boolean; error?: unknown; }
 
 export const dwsPath = process.env.DWS_CLI_PATH?.trim() || "dws";
@@ -243,6 +247,21 @@ export async function listGroupMembers(groupId: string): Promise<GroupMember[]> 
     const senderId = user.openDingtalkId?.trim();
     const senderName = user.name?.trim() || user.nick?.trim();
     return senderId && senderName ? [{ senderId, senderName, role: user.role }] : [];
+  });
+}
+
+/**
+ * 机器人成员与真人成员使用同一套 openDingtalkId，可用于判断群消息是否由
+ * 群内机器人（AI）发出。返回的 senderId 与事件里的 sender_open_dingtalk_id 可直接比较。
+ */
+export async function listGroupBotMembers(groupId: string): Promise<Array<{ senderId: string; senderName: string }>> {
+  const result = await runDwsJson<DwsGroupBotMembersResponse>([
+    "chat", "+chat-members-list", "--conversation-id", groupId, "--member-types", "bot",
+  ]);
+  return (result.bots ?? []).flatMap((bot) => {
+    const senderId = (bot.openDingtalkId || bot.openDingTalkId)?.trim();
+    const senderName = bot.name?.trim();
+    return senderId && senderName ? [{ senderId, senderName }] : [];
   });
 }
 

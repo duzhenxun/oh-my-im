@@ -1,6 +1,6 @@
 import { mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -24,6 +24,7 @@ import {
   getDwsDeviceLoginOutput,
   logoutDws,
   listGroupBots,
+  listGroupBotMembers,
   addBotToGroup,
   listGroupMembers,
   searchGroups,
@@ -34,6 +35,7 @@ import {
 } from "./dws-client.js";
 import type { GroupMember } from "./dws-dashboard.js";
 import { createLogger } from "./logger.js";
+import { normalizeDingTalkMarkdown } from "./markdown.js";
 import { sendRobotGroupText, sendRobotWebhookText } from "./dingtalk-robot.js";
 import { runDwsJson } from "./dws-client.js";
 import { appendConversationLog } from "./conversation-log.js";
@@ -59,7 +61,6 @@ async function sendRobotText(openConversationId: string, config: DashboardConfig
   log.info(`robot API send openConversationId=${openConversationId} robotCode=${config.clientId} robotName=${config.robotName}`);
   return sendRobotGroupText(openConversationId, content, config.clientId, config.clientId, config.clientSecret);
 }
-const DEFAULT_CODEX_WORK_DIR = process.cwd();
 const DEFAULT_DWS_CODEX_TIMEOUT_MS = 300_000;
 const DWS_GROUP_MESSAGE_EVENT = "user_im_message_receive_group_all";
 
@@ -678,8 +679,11 @@ function configuredGroupIds(config: DashboardConfig): string[] {
 }
 
 function formatReply(content: string, format: DashboardConfig["replyFormat"]): string {
-  if (format === "markdown") return content;
-  return content.replace(/[\\`*_{}\[\]<>()#+\-.!|]/g, "\\$&");
+  // DingTalk markdown has no table support; rewrite tables into readable lists
+  // for both the card and the plain-text reply path.
+  const normalized = normalizeDingTalkMarkdown(content);
+  if (format === "markdown") return normalized;
+  return normalized.replace(/[\\`*_{}\[\]<>()#+\-.!|]/g, "\\$&");
 }
 
 function completedCardContent(content: string, modelName: string, messageCount: number, toolStats: Record<string, number>, showDetails: boolean): string {
@@ -733,11 +737,53 @@ function getSenderId(event: DwsMessageEvent): string {
     "unknown";
 }
 
+// Group bot members are AI senders. Their openDingtalkId is the same namespace
+// as the event's sender_open_dingtalk_id, so messages coming from any bot in the
+// group can be ignored without replying to another AI.
+interface GroupBotCacheEntry { ids: Map<string, string>; fetchedAt: number; }
+const groupBotCache = new Map<string, GroupBotCacheEntry>();
+const groupBotRefreshing = new Set<string>();
+const GROUP_BOT_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function refreshGroupBotCache(groupId: string, force = false): Promise<void> {
+  const cached = groupBotCache.get(groupId);
+  if (!force && cached && Date.now() - cached.fetchedAt < GROUP_BOT_CACHE_TTL_MS) return;
+  if (groupBotRefreshing.has(groupId)) return;
+  groupBotRefreshing.add(groupId);
+  try {
+    const bots = await listGroupBotMembers(groupId);
+    groupBotCache.set(groupId, {
+      ids: new Map(bots.map((bot) => [bot.senderId.toLowerCase(), bot.senderName])),
+      fetchedAt: Date.now(),
+    });
+    log.info(`group bot members refreshed group=${groupId} bots=${bots.map((bot) => bot.senderName).join(",") || "<none>"}`);
+  } catch (err) {
+    log.warn(`unable to refresh group bot members group=${groupId}: ${String(err)}`);
+    // Cache the failure briefly so a broken DWS call does not run on every message.
+    if (!cached) groupBotCache.set(groupId, { ids: new Map(), fetchedAt: Date.now() });
+  } finally {
+    groupBotRefreshing.delete(groupId);
+  }
+}
+
+// Values of the DingTalk "AI sent" badge/flag that mean the message came from
+// an AI. Anything else (including normal user messages) is not treated as AI so
+// a real person can never be silenced by an unexpected flag value.
+const AI_SEND_FLAG_VALUES = new Set(["DWS", "AI", "AIGC", "AI_TAG", "AITAG", "ROBOT", "BOT", "ASSISTANT", "TRUE", "1", "Y", "YES", "ON"]);
+function isAiSendFlag(event: DwsMessageEvent): boolean {
+  const raw = [event.messageAiSendFlag, event.aiSendFlag, event.message_ai_send_flag, event.aiTag, event.ai_tag, event.messageAiTag, event.message_ai_tag]
+    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  if (!raw) return false;
+  return AI_SEND_FLAG_VALUES.has(raw.trim().toUpperCase());
+}
+
 function isIgnoredRobotEvent(event: DwsMessageEvent, config: DashboardConfig): boolean {
   const sender = event.sender ?? {};
   const senderId = getSenderId(event).toLowerCase();
-  const messageAiSendFlag = typeof event.messageAiSendFlag === "string" ? event.messageAiSendFlag.trim().toUpperCase() : "";
-  if (messageAiSendFlag === "DWS") return true;
+  if (isAiSendFlag(event)) return true;
+  // Any bot that is a member of this group is an AI sender.
+  const groupId = eventGroupId(event);
+  if (groupId && groupBotCache.get(groupId)?.ids.has(senderId)) return true;
   const configuredRobotId = config.robotSenderOpenDingTalkId?.trim().toLowerCase();
   if (configuredRobotId && senderId === configuredRobotId) return true;
   const robotName = config.robotName.trim().toLowerCase();
@@ -783,8 +829,35 @@ function isIgnoredRobotEvent(event: DwsMessageEvent, config: DashboardConfig): b
   return false;
 }
 
-function codexConfig(): Config {
-  const workDir = process.env.CODEX_WORK_DIR?.trim() || DEFAULT_CODEX_WORK_DIR;
+function safeDirName(value: string, fallback: string): string {
+  // Keep Chinese characters and normal punctuation, strip anything that could
+  // escape the target directory or break on the filesystem.
+  const cleaned = value
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+/, "")
+    .trim()
+    .slice(0, 80)
+    .trim();
+  return cleaned || fallback;
+}
+
+function groupWorkDir(groupId: string, dashboardConfig: DashboardConfig, event?: DwsMessageEvent): string {
+  // Explicit env override wins (exact directory, no group subfolder).
+  const override = process.env.CODEX_WORK_DIR?.trim();
+  if (override) return override;
+  const name = event ? eventGroupName(event, groupId, dashboardConfig) : knownGroupName(groupId);
+  return join(DATA_DIR, "group", safeDirName(name, safeDirName(groupId, "unknown")));
+}
+
+function codexConfig(workDir: string): Config {
+  // Auto-create a configured directory so all three Agents can spawn in it.
+  // Failures are logged (not thrown) and surface later as a spawn error.
+  if (!existsSync(workDir)) {
+    try { mkdirSync(workDir, { recursive: true }); }
+    catch (err) { log.warn(`cannot create group work dir ${workDir}: ${String(err)}`); }
+  }
   const timeout = Number.parseInt(
     process.env.DWS_CODEX_TIMEOUT_MS || String(DEFAULT_DWS_CODEX_TIMEOUT_MS),
     10,
@@ -812,12 +885,14 @@ function cleanAgentContent(value: string): string {
     .trim();
 }
 
-function buildPrompt(events: DwsMessageEvent[]): string {
+function buildPrompt(events: DwsMessageEvent[], suffix: string): string {
   const messageContent = events
     .map((event) => cleanAgentContent(event.content?.trim() || event.text?.trim() || ""))
     .filter(Boolean)
     .join("\n");
-  return messageContent;
+  // Restore the prompt suffix that the OpenCode refactor dropped: it is
+  // appended below the user message and applies to every group Agent.
+  return [messageContent, suffix.trim()].filter(Boolean).join("\n\n");
 }
 
 async function handleBatch(
@@ -838,14 +913,15 @@ async function handleBatch(
   const dashboardConfig = getDashboardConfig();
   const responseMode = dashboardConfig.responseMode ?? "card";
   const agent = dashboardConfig.agent;
-  const agentConfig = codexConfig();
+  const workDir = groupWorkDir(groupId, dashboardConfig, events[0]);
+  const agentConfig = codexConfig(workDir);
   agentConfig.agent = agent;
     agentConfig.agentModel = agent === "pi" || agent === "opencode" ? dashboardConfig.agentModels[agent] || undefined : undefined;
   const modelName = agentConfig.agentModel?.trim().split("/").pop() || "";
   const label = `${agentLabel(agent)} Agent`;
   const processingLabel = agent === "codex" ? `${agentLabel(agent)} Agent` : `${agentLabel(agent)} ${modelName || "默认模型"}`;
   const processingMessage = `[OMG] ${processingLabel} 正在分析...`;
-  const sessionKey = `${agent}:${groupId}`;
+  const sessionKey = `${agent}:${groupId}:${workDir}`;
   const sessionId = sessions.get(sessionKey);
   log.info(
     `processing batch size=${events.length} groupSession=${sessionId ? "resume" : "new"}`,
@@ -985,7 +1061,7 @@ async function handleBatch(
     }
     let streamedText = "";
     let toolStatus = "";
-    const result = await runAgent(agent, buildPrompt(events), sessionId, agentConfig, {
+    const result = await runAgent(agent, buildPrompt(events, dashboardConfig.groupPromptSuffix), sessionId, agentConfig, {
       onAbortReady: (abort) => { if (queue) queue.abort = abort; },
       onSteerReady: (steer) => { if (queue && agent === "pi") queue.steer = steer; },
       onToolUse: (toolName, stats) => {
@@ -1216,6 +1292,9 @@ function startGroupListener(
       log.warn("group event ignored: missing conversation_id");
       return;
     }
+    // Keep the group-bot cache warm for monitored groups. Non-blocking: the
+    // current message uses the cached copy, which is prefetched at startup.
+    if (config.targets.some((target) => target.groupId === groupId)) void refreshGroupBotCache(groupId);
     if (isIgnoredRobotEvent(event, config)) {
       log.debug(`ignored robot message event=${event.event_id || "unknown"}`);
       return;
@@ -1316,9 +1395,10 @@ function startGroupListener(
           await sendRobotText(groupId, getDashboardConfig(), "当前 Agent 任务正在运行，请先暂停后再新建会话。");
           return;
         }
-        sessions.delete(`pi:${groupId}`);
-        sessions.delete(`codex:${groupId}`);
-        sessions.delete(`opencode:${groupId}`);
+        for (const agent of ["pi", "codex", "opencode"] as const) {
+          const prefix = `${agent}:${groupId}:`;
+          for (const key of [...sessions.keys()]) if (key.startsWith(prefix)) sessions.delete(key);
+        }
         await saveGroupSessions(sessions);
         await sendRobotText(groupId, getDashboardConfig(), "已清空当前群会话的 Agent session，下一条消息将使用新会话处理。");
         log.info(`group sessions cleared group=${groupId}`);
@@ -1523,6 +1603,14 @@ async function main(): Promise<void> {
   await saveDashboardConfig(dashboardConfig);
   cardClient.setCredentials(dashboardConfig.clientId, dashboardConfig.clientSecret);
   cardClient.setRobotCode(dashboardConfig.clientId);
+  // Warm the group-bot cache for every monitored group so a message from any
+  // AI robot in the group is ignored from the very first event.
+  void Promise.all(configuredGroupIds(dashboardConfig).map((groupId) => refreshGroupBotCache(groupId, true)));
+  // Refresh periodically so bots added after startup are also ignored.
+  const groupBotRefreshTimer = setInterval(() => {
+    void Promise.all(configuredGroupIds(dashboardConfig).map((groupId) => refreshGroupBotCache(groupId, true)));
+  }, GROUP_BOT_CACHE_TTL_MS);
+  groupBotRefreshTimer.unref();
   const replies = await loadReplyHistory();
   const liveReplies = new Map<string, ReplyRecord>();
   const runtime: ListenerRuntime = {

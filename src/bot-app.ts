@@ -5,6 +5,7 @@ import { loadConfig, type Config } from "./config.js";
 import { agentLabel, agentSwitchMessage, listAgentSessions, runAgent, type AgentSessionInfo } from "./agents/index.js";
 import { DingTalkBot, isSingleConversation, type DingTalkTextMessage, type DownloadedAttachment } from "./dingtalk.js";
 import { createLogger } from "./logger.js";
+import { normalizeDingTalkMarkdown } from "./markdown.js";
 import type { CommandKeywordsConfig } from "./dws-dashboard.js";
 import type { ResponseMode } from "./dws-dashboard.js";
 import { parseAgentControlCommand } from "./monitor-command.js";
@@ -50,8 +51,11 @@ try {
   Object.entries(stored).forEach(([key, value]) => { if (typeof value === "string" && value.trim()) privateSessionBindings.set(key, value.trim()); });
 } catch { /* first run */ }
 
-function privateSessionKey(conversationId: string, agent: Config["agent"]): string {
-  return `${agent}:${conversationId}`;
+function privateSessionKey(conversationId: string, agent: Config["agent"], workDir: string): string {
+  // The work directory is part of the key: a stored session created in a
+  // different directory must never be resumed, otherwise Pi/Codex/OpenCode
+  // fail with a project mismatch after the working directory changes.
+  return `${agent}:${conversationId}:${workDir}`;
 }
 
 function savePrivateSessions(): void {
@@ -62,21 +66,47 @@ function savePrivateSessions(): void {
 }
 
 function clearPrivateSessionBindings(conversationId: string): void {
-  privateSessionBindings.delete(privateSessionKey(conversationId, "pi"));
-  privateSessionBindings.delete(privateSessionKey(conversationId, "codex"));
-  privateSessionBindings.delete(privateSessionKey(conversationId, "opencode"));
-  savePrivateSessions();
+  let changed = false;
+  for (const agent of ["pi", "codex", "opencode"] as const) {
+    const prefix = `${agent}:${conversationId}:`;
+    for (const key of [...privateSessionBindings.keys()]) {
+      if (key.startsWith(prefix)) {
+        privateSessionBindings.delete(key);
+        changed = true;
+      }
+    }
+  }
+  if (changed) savePrivateSessions();
 }
 
 const log = createLogger("Main");
 
-function safePathPart(value: string): string {
-  return value.trim().replace(/[^\w.-]+/g, "_").slice(0, 120) || "unknown";
+function safeDirName(value: string, fallback: string): string {
+  // Chinese display names are valid directory names; only strip characters
+  // that are illegal on the filesystem or could escape the parent directory.
+  const cleaned = value
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+/, "")
+    .trim()
+    .slice(0, 80)
+    .trim();
+  return cleaned || fallback;
 }
 
 function privateUserWorkDir(message: DingTalkTextMessage): string {
+  // An explicit AGENT_WORK_DIR override is used as-is (single shared dir).
+  const override = process.env.AGENT_WORK_DIR?.trim();
+  if (override) {
+    mkdirSync(override, { recursive: true });
+    return override;
+  }
+  // Otherwise each DingTalk user gets their own directory named after the
+  // sender display name, for example ~/.oh-my-im/users/杜振训.
   const userId = message.senderStaffId?.trim() || message.senderId.trim();
-  const dir = join(homedir(), ".oh-my-im", "users", safePathPart(userId), "workspace");
+  const displayName = safeDirName(message.senderNick ?? "", safeDirName(userId, "unknown"));
+  const dir = join(homedir(), ".oh-my-im", "users", displayName);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -93,13 +123,29 @@ function getState(
   defaultWorkDir: string,
 ): ConversationState {
   const existing = conversations.get(conversationId);
-  if (existing) return existing;
+  if (existing) {
+    // The directory is derived from the sender display name, so a nickname
+    // change must take effect on the next message. Reset the bound sessions
+    // and selections so no Agent keeps running in (or resumes a session from)
+    // the previous directory.
+    if (existing.defaultWorkDir !== defaultWorkDir) {
+      existing.defaultWorkDir = defaultWorkDir;
+      existing.selectedSessions = {};
+      existing.visibleSessionLists = {};
+      existing.sessions = {};
+      // Drop persisted session bindings too; resuming a session created in the
+      // previous directory makes Pi/Codex/OpenCode fail with a project
+      // mismatch, so the next message must start a fresh session.
+      clearPrivateSessionBindings(conversationId);
+    }
+    return existing;
+  }
   const created: ConversationState = {
     defaultWorkDir,
     sessions: {}, selectedSessions: {}, visibleSessionLists: {}, pendingMessages: [], pendingNoticeSent: false, busy: false,
   };
   (['codex', 'pi', 'opencode'] as const).forEach((agent) => {
-    const sessionId = privateSessionBindings.get(privateSessionKey(conversationId, agent));
+    const sessionId = privateSessionBindings.get(privateSessionKey(conversationId, agent, defaultWorkDir));
     if (sessionId) created.sessions[agent] = sessionId;
   });
   conversations.set(conversationId, created);
@@ -186,7 +232,9 @@ function shortModelName(model: string | undefined): string {
 }
 
 function buildCardContent(content: string, note?: string): string {
-  const safeContent = content.trim() || "[OMG] 正在分析...";
+  // DingTalk cards render a limited Markdown subset without table support, so
+  // convert tables to lists before they reach the card.
+  const safeContent = normalizeDingTalkMarkdown(content).trim() || "[OMG] 正在分析...";
   const safeNote = note?.trim();
   return safeNote ? `${safeContent}\n\n\n${safeNote}` : safeContent;
 }
@@ -650,6 +698,9 @@ export async function runApp(
     const selectedAgent = state.selectedAgent ?? options.getAgent?.() ?? config.agent;
     const currentConfig = {
       ...config,
+      // Session listing and command handling must run in the same isolated
+      // directory the Agent will execute in, for Codex, Pi and OpenCode alike.
+      codexWorkDir: state.defaultWorkDir,
       agent: selectedAgent,
       agentModel: selectedAgent !== "codex"
         ? options.getAgentModel?.(selectedAgent) ?? (config.agentModels[selectedAgent] || undefined)
@@ -829,14 +880,14 @@ export async function runApp(
       stopCardUpdatesForCurrentTask = undefined;
       state.sessions[agent] = result.sessionId ?? state.sessions[agent];
       if (state.sessions[agent]) {
-        privateSessionBindings.set(privateSessionKey(message.conversationId, agent), state.sessions[agent] as string);
+        privateSessionBindings.set(privateSessionKey(message.conversationId, agent, selectedSession?.cwd ?? state.defaultWorkDir), state.sessions[agent] as string);
         savePrivateSessions();
       }
       const toolCount = Object.values(result.toolStats).reduce((total, count) => total + count, 0);
       const note = `[夯爆了] ${modelName || "默认模型"} 1条消息 ${toolCount}次工具`;
       const finalContent = buildCardContent(result.text, options.getShowProcessingDetails?.() === true ? note : undefined);
       if (responseMode === "card") await bot.updateReply(reply, finishedTitle("✅", "完成"), finalContent);
-      else await bot.sendText(message.conversationId, result.text.trim() || "(无输出)");
+      else await bot.sendText(message.conversationId, normalizeDingTalkMarkdown(result.text).trim() || "(无输出)");
       await appendConversationLog({
         id: `${message.conversationId}:${taskStartedAt}`,
         createdAt: new Date().toISOString(),
