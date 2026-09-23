@@ -1,5 +1,5 @@
-import type { AgentType, Config } from "../config.js";
-export type { AgentType } from "../config.js";
+import type { AgentType, Config } from "../core/config.js";
+export type { AgentType } from "../core/config.js";
 import { listCodexSessions, runCodex } from "./codex-agent.js";
 import { listPiSessions, runPi } from "./pi-agent.js";
 import { listOpenCodeSessions, runOpenCode } from "./opencode-agent.js";

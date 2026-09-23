@@ -3,7 +3,7 @@ import { open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { runApp } from "./bot-app.js";
-import { resolveAgentModel, type Config } from "./config.js";
+import { resolveAgentModel, type Config } from "./core/config.js";
 import { type AgentModels, type CommandKeywordsConfig } from "./dws-dashboard.js";
 
 const stateDir = join(homedir(), ".oh-my-im");
@@ -24,8 +24,11 @@ interface DashboardCredentials {
   botAllowedUserNames?: Record<string, string>;
   commandKeywords?: CommandKeywordsConfig;
   privateChatEnabled?: boolean;
-  responseMode?: "card" | "text";
+  responseMode?: "card" | "aiCard" | "text";
   showProcessingDetails?: boolean;
+  aiCardTemplateId?: string;
+  aiCardContentKey?: string;
+  aiCardStreamIntervalMs?: number;
 }
 
 async function acquireLock(): Promise<() => Promise<void>> {
@@ -77,11 +80,11 @@ function loadBotConfig(): Config {
     codexCliPath: "codex",
     codexWorkDir: defaultWorkDir,
     agentModels: {
-      codex: "",
+      codex: resolveAgentModel("codex", credentials.agentModels, credentials.agent, credentials.agentModel) || "",
       pi: resolveAgentModel("pi", credentials.agentModels, credentials.agent, credentials.agentModel) || "",
       opencode: resolveAgentModel("opencode", credentials.agentModels, credentials.agent, credentials.agentModel) || "",
     },
-    agentModel: credentials.agent === "pi" || credentials.agent === "opencode"
+    agentModel: credentials.agent === "pi" || credentials.agent === "opencode" || credentials.agent === "codex"
       ? resolveAgentModel(credentials.agent, credentials.agentModels, credentials.agent, credentials.agentModel)
       : undefined,
     codexPermissionMode: "bypass",
@@ -109,6 +112,12 @@ function markBotStopped(): void {
 
 const releaseLock = await acquireLock();
 process.once("exit", () => {
+  // 进程真正退出时才写“已停止”，否则会覆盖 runApp 初始化后写入的“已连接”。
+  try {
+    markBotStopped();
+  } catch {
+    // status is diagnostic only
+  }
   try {
     unlinkSync(lockFile);
   } catch {
@@ -139,7 +148,6 @@ try {
       }
     },
     getAgentModel: (agent) => {
-      if (agent === "codex") return undefined;
       try {
         const current = JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials;
         const model = resolveAgentModel(agent, current.agentModels, current.agent, current.agentModel);
@@ -152,9 +160,22 @@ try {
     getResponseMode: () => {
       try {
         const current = JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials;
-        return current.responseMode === "text" ? "text" : "card";
+        return current.responseMode === "text" ? "text" : current.responseMode === "aiCard" ? "aiCard" : "card";
       } catch {
         return "card";
+      }
+    },
+    getAiCardConfig: () => {
+      // Live value so a template ID saved in the console applies to the next message.
+      try {
+        const current = JSON.parse(readFileSync(dashboardConfigFile, "utf8")) as DashboardCredentials;
+        return {
+          templateId: typeof current.aiCardTemplateId === "string" ? current.aiCardTemplateId.trim() : "",
+          contentKey: typeof current.aiCardContentKey === "string" && current.aiCardContentKey.trim() ? current.aiCardContentKey.trim() : "content",
+          streamIntervalMs: Number.isFinite(current.aiCardStreamIntervalMs) ? Number(current.aiCardStreamIntervalMs) : 500,
+        };
+      } catch {
+        return { templateId: "", contentKey: "content", streamIntervalMs: 500 };
       }
     },
     getShowProcessingDetails: () => {
@@ -217,7 +238,10 @@ try {
       }
     },
   });
-} finally {
+} catch (err) {
+  // 只有初始化失败才在这里收尾；正常情况 runApp 返回后 Stream/定时器仍在运行，
+  // markBotStopped 交给 process exit 处理。
   markBotStopped();
   await releaseLock();
+  throw err;
 }

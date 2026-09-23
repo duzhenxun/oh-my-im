@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ConversationMessage, ReplyRecord } from "./dws-dashboard.js";
+import type { ConversationMessage, ReplyRecord } from "../dws-dashboard.js";
 
 const LOG_ROOT = join(process.env.OHMIM_DATA_DIR?.trim() || join(process.env.HOME || ".", ".oh-my-im"), "replies");
 

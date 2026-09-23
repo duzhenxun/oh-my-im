@@ -8,9 +8,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   startDashboard,
-  isOpenCodeModelAllowed,
-  isPiModelAllowed,
   normalizeAgentModel,
+  SESSION_MAX_AGE_SECONDS,
   type DashboardConfig,
   type DashboardStatus,
   type ReplyRecord,
@@ -26,8 +25,8 @@ import {
   listGroupMembers,
   searchUsers,
   searchBots,
-} from "./dws-client.js";
-import { readVersion } from "./version.js";
+} from "./dws/dws-client.js";
+import { readVersion } from "./core/version.js";
 
 const dataDir = join(homedir(), ".oh-my-im");
 const configFile = join(dataDir, "dws-dashboard.json");
@@ -40,7 +39,9 @@ const omiPath = join(workerDir, "omi.js");
 const processPaths: Record<string, string> = { "group-worker": join(workerDir, "group-worker.js"), bot: join(workerDir, "bot-worker.js") };
 const repliesDir = join(dataDir, "replies");
 const passwordFile = join(dataDir, "dashboard-password.json");
+const sessionsFile = join(dataDir, "dashboard-sessions.json");
 const scrypt = promisify(scryptCallback);
+const SESSION_TTL_MS = SESSION_MAX_AGE_SECONDS * 1000;
 const sessions = new Map<string, number>();
 const DEFAULT_PASSWORD = "5552123";
 
@@ -64,6 +65,26 @@ function cookieValue(request: import("node:http").IncomingMessage): string | und
   return request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith("omi_session="))?.slice("omi_session=".length);
 }
 
+// 登录会话持久化到磁盘，重启看板不会把已登录的设备踢下线（有效期 60 天）。
+async function loadSessions(): Promise<void> {
+  try {
+    const stored = JSON.parse(await readFile(sessionsFile, "utf8")) as Record<string, unknown>;
+    const now = Date.now();
+    Object.entries(stored).forEach(([token, expires]) => {
+      if (typeof expires === "number" && expires > now) sessions.set(token, expires);
+    });
+  } catch { /* first run */ }
+}
+async function saveSessions(): Promise<void> {
+  const now = Date.now();
+  for (const [token, expires] of sessions) if (expires <= now) sessions.delete(token);
+  await mkdir(dataDir, { recursive: true });
+  const temporary = `${sessionsFile}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(Object.fromEntries(sessions))}\n`, { encoding: "utf8", mode: 0o600 });
+  await chmod(temporary, 0o600);
+  await rename(temporary, sessionsFile);
+}
+
 interface AgentModelList {
   models: string[];
   defaultModel?: string;
@@ -82,7 +103,7 @@ const defaultConfig = (): DashboardConfig => ({
   targets: [], botAllowedUserIds: [], botAllowedUserNames: {},
   botSuperAdminUserIds: [], botSuperAdminUserNames: {}, robotSenderOpenDingTalkId: "",
   commandKeywords: { pause: [], monitorOpen: [], monitorStop: [], switchPi: [], switchCodex: [], switchOpencode: [] },
-  groupPromptSuffix: "", replyFormat: "markdown", robotName: "AI Agent",
+  groupPromptSuffix: "", aiCardTemplateId: "", aiCardContentKey: "content", aiCardStreamIntervalMs: 500, robotName: "AI Agent",
   clientId: "", clientSecret: "", agentModels: { codex: "", pi: "", opencode: "" }, agent: "pi",
 });
 
@@ -95,7 +116,7 @@ async function loadConfig(): Promise<DashboardConfig> {
     return {
       ...defaultConfig(),
       ...migrated,
-      agentModels: { ...defaultConfig().agentModels, ...(migrated.agentModels ?? {}), codex: "" },
+      agentModels: { ...defaultConfig().agentModels, ...(migrated.agentModels ?? {}) },
       commandKeywords: { ...defaultConfig().commandKeywords, ...(migrated.commandKeywords ?? {}) },
     };
   } catch {
@@ -304,12 +325,34 @@ function externalCliEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+async function listCodexModels(): Promise<string[]> {
+  // Codex CLI 没有列模型的命令，但会在 config.toml 的 model_catalog_json 里
+  // 指定模型目录（含内置目录）；读出其中的 slug 作为可选模型。
+  const home = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  let catalogPath = join(home, "models.json");
+  try {
+    const toml = await readFile(join(home, "config.toml"), "utf8");
+    const match = toml.match(/^\s*model_catalog_json\s*=\s*["']([^"']+)["']/m);
+    if (match?.[1]) catalogPath = match[1];
+  } catch { /* fall back to the default catalog path */ }
+  try {
+    const parsed = JSON.parse(await readFile(catalogPath, "utf8")) as { models?: Array<{ slug?: unknown; visibility?: unknown }> };
+    const slugs = (parsed.models ?? [])
+      .filter((model) => model.visibility !== "hide")
+      .map((model) => (typeof model.slug === "string" ? model.slug.trim() : ""))
+      .filter(Boolean);
+    return [...new Set(slugs)];
+  } catch {
+    return [];
+  }
+}
+
 async function listAgentModels(agent: "codex" | "pi" | "opencode"): Promise<AgentModelList> {
-  const command = agent === "pi" ? "pi" : agent === "opencode" ? "opencode" : "codex";
+  if (agent === "codex") return { models: await listCodexModels() };
+  const command = agent === "pi" ? "pi" : "opencode";
   const args = agent === "opencode" ? ["models"] : ["--list-models"];
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 20_000, env: agent === "opencode" ? externalCliEnv() : process.env });
   if (result.error || result.status !== 0) {
-    if (agent === "codex") return { models: ["默认模型（不指定）"] };
     throw new Error(result.stderr?.trim() || result.error?.message || `${command} 模型列表查询失败`);
   }
   const lines = String(result.stdout || "").split(/\r?\n/).map((line) => line.trim());
@@ -319,7 +362,7 @@ async function listAgentModels(agent: "codex" | "pi" | "opencode"): Promise<Agen
       return match && match[1] !== "provider" ? [`${match[1]}/${match[2]}`] : [];
     })
     : lines.filter((line) => line && !/^[-= ]+$/.test(line) && !/^available models/i.test(line));
-  if (agent === "pi") return { models: [...new Set(models.filter(isPiModelAllowed))] };
+  if (agent === "pi") return { models: [...new Set(models)] };
   if (agent !== "opencode") return { models: [...new Set(models)] };
 
   let defaultModel: string | undefined;
@@ -334,16 +377,20 @@ async function listAgentModels(agent: "codex" | "pi" | "opencode"): Promise<Agen
       if (typeof resolvedConfig.model === "string" && resolvedConfig.model.trim()) defaultModel = resolvedConfig.model.trim();
     } catch { /* model list remains usable if debug output changes */ }
   }
-  const filteredModels = models.filter((model) => isOpenCodeModelAllowed(model));
-  if (defaultModel && !isOpenCodeModelAllowed(defaultModel)) defaultModel = undefined;
-  return { models: [...new Set(defaultModel ? [defaultModel, ...filteredModels] : filteredModels)], defaultModel };
+  // 不做白名单过滤，OpenCode CLI 能列出什么就展示什么。
+  return { models: [...new Set(defaultModel ? [defaultModel, ...models] : models)], defaultModel };
 }
 
 async function botStatus(): Promise<{ enabled: boolean; connected: boolean; updatedAt?: string }> {
   const config = await loadConfig();
   try {
-    const value = JSON.parse(await readFile(botStatusFile, "utf8")) as { connected?: boolean; updatedAt?: string };
-    return { enabled: config.privateChatEnabled === true, connected: config.privateChatEnabled === true && value.connected !== false, updatedAt: value.updatedAt };
+    const value = JSON.parse(await readFile(botStatusFile, "utf8")) as { pid?: number; connected?: boolean; updatedAt?: string };
+    // 状态文件可能是上次进程遗留的：进程已经不在时不能报“已连接”。
+    const alive = typeof value.pid === "number" && value.pid > 0 && (() => {
+      try { process.kill(value.pid as number, 0); return true; } catch { return false; }
+    })();
+    const enabled = config.privateChatEnabled === true;
+    return { enabled, connected: enabled && alive && value.connected !== false, updatedAt: value.updatedAt };
   } catch { return { enabled: config.privateChatEnabled !== false, connected: false }; }
 }
 
@@ -373,6 +420,7 @@ async function main(): Promise<void> {
   }, 1_000);
   replyReloadTimer.unref();
   const password = await loadPassword();
+  await loadSessions();
   // Password-free access only for genuinely local use. A reverse proxy or
   // tunnel (nginx/frp) on this machine also connects from 127.0.0.1, so the
   // socket alone cannot separate local use from proxied external traffic.
@@ -390,16 +438,15 @@ async function main(): Promise<void> {
   };
   const auth = {
     isAuthenticated: (request: import("node:http").IncomingMessage) => { if (isLoopbackRequest(request)) return true; const token = cookieValue(request); const expires = token ? sessions.get(token) : undefined; return Boolean(expires && expires > Date.now()); },
-    login: async (candidate: string) => { const derived = await passwordHash(candidate, password.salt); const matches = derived.hash.length === password.hash.length && timingSafeEqual(Buffer.from(derived.hash, "hex"), Buffer.from(password.hash, "hex")); if (!matches) return null; const token = randomBytes(32).toString("base64url"); sessions.set(token, Date.now() + 8 * 60 * 60 * 1000); return token; },
-    logout: (request: import("node:http").IncomingMessage) => { const token = cookieValue(request); if (token) sessions.delete(token); },
-    changePassword: async (request: import("node:http").IncomingMessage, current: string, next: string) => { if (!auth.isAuthenticated(request)) return "未登录"; if (next.length < 8 || next.length > 200) return "新密码长度需为 8-200 位"; const currentHash = await passwordHash(current, password.salt); if (currentHash.hash.length !== password.hash.length || !timingSafeEqual(Buffer.from(currentHash.hash, "hex"), Buffer.from(password.hash, "hex"))) return "当前密码错误"; const record = await passwordHash(next); await savePassword(record); password.salt = record.salt; password.hash = record.hash; sessions.clear(); return null; },
+    login: async (candidate: string) => { const derived = await passwordHash(candidate, password.salt); const matches = derived.hash.length === password.hash.length && timingSafeEqual(Buffer.from(derived.hash, "hex"), Buffer.from(password.hash, "hex")); if (!matches) return null; const token = randomBytes(32).toString("base64url"); sessions.set(token, Date.now() + SESSION_TTL_MS); void saveSessions(); return token; },
+    logout: (request: import("node:http").IncomingMessage) => { const token = cookieValue(request); if (token) { sessions.delete(token); void saveSessions(); } },
+    changePassword: async (request: import("node:http").IncomingMessage, current: string, next: string) => { if (!auth.isAuthenticated(request)) return "未登录"; if (next.length < 8 || next.length > 200) return "新密码长度需为 8-200 位"; const currentHash = await passwordHash(current, password.salt); if (currentHash.hash.length !== password.hash.length || !timingSafeEqual(Buffer.from(currentHash.hash, "hex"), Buffer.from(password.hash, "hex"))) return "当前密码错误"; const record = await passwordHash(next); await savePassword(record); password.salt = record.salt; password.hash = record.hash; sessions.clear(); void saveSessions(); return null; },
   };
   startDashboard(serverConfig.port, {
     getConfig: () => config,
     updateConfig: async (next) => {
-      const normalized = { ...next, agentModels: { ...next.agentModels, codex: "" } };
-      await saveConfig(normalized);
-      config = normalized;
+      await saveConfig(next);
+      config = next;
     },
     getStatus: () => ({ ...runtime }),
     // Replies are persisted by group-worker/bot. The dashboard remains usable

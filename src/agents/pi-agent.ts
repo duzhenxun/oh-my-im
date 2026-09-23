@@ -3,8 +3,8 @@ import { open, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentCallbacks, AgentResult, AgentSessionInfo } from "./index.js";
-import type { Config } from "../config.js";
-import { createLogger } from "../logger.js";
+import type { Config } from "../core/config.js";
+import { createLogger } from "../core/logger.js";
 import { asObject, attachJsonlReader, createAgentEnv, type JsonObject } from "./process-utils.js";
 
 const log = createLogger("Pi");
@@ -45,7 +45,14 @@ export async function listPiSessions(_config: Config): Promise<AgentSessionInfo[
       let title: string | undefined;
       let summary: string | undefined;
       for (const line of lines.slice(1)) {
-        const event = JSON.parse(line) as Record<string, unknown>;
+        let event: Record<string, unknown>;
+        try {
+          event = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          // readPrefix 只读前 128KB，最后一行可能是被截断的半行；
+          // 跳过它，不要因为这一行丢掉整个 session。
+          continue;
+        }
         const message = asObject(event.message);
         if (event.type !== "message" || !Array.isArray(message?.content)) continue;
         const text = message.content.flatMap((part) => {

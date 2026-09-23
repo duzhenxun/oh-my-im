@@ -4,8 +4,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { AgentCallbacks, AgentResult, AgentSessionInfo } from "./index.js";
-import type { Config } from "../config.js";
-import { createLogger } from "../logger.js";
+import type { Config } from "../core/config.js";
+import { createLogger } from "../core/logger.js";
 import { createAgentEnv } from "./process-utils.js";
 
 const log = createLogger("Codex");
@@ -64,7 +64,15 @@ export async function listCodexSessions(_config: Config): Promise<AgentSessionIn
   const sessions = await Promise.all(files.map(async (path): Promise<AgentSessionInfo | undefined> => {
     try {
       const events = (await readPrefix(path)).split(/\r?\n/).filter(Boolean)
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
+        .flatMap((line) => {
+          try {
+            return [JSON.parse(line) as Record<string, unknown>];
+          } catch {
+            // readPrefix 只读前 512KB，最后一行可能是被截断的半行；跳过它，
+            // 不要因为这一行丢掉整个 session。
+            return [];
+          }
+        });
       const meta = events.find((event) => event.type === "session_meta");
       const payload = meta?.payload as Record<string, unknown> | undefined;
       if (!meta || !payload) return undefined;
@@ -165,6 +173,8 @@ function queueCodexMessage(cliPath: string, threadId: string, message: string, c
 
 function buildArgs(prompt: string, workDir: string, sessionId: string | undefined, config: Config): string[] {
   const common = ["--json", "--skip-git-repo-check"];
+  // 管理页配置了 Codex 模型时显式传入；未配置则沿用 Codex CLI 自己的默认模型。
+  if (config.agentModel) common.push("--model", config.agentModel);
   if (config.codexPermissionMode === "bypass") {
     common.push("--dangerously-bypass-approvals-and-sandbox");
   } else if (config.codexPermissionMode === "read-only") {
@@ -188,8 +198,8 @@ export function runCodex(
     const start = Date.now();
     const args = buildArgs(prompt, config.codexWorkDir, sessionId, config);
     const env = createAgentEnv(config.codexProxy);
-    // Codex model selection belongs exclusively to the CLI config. Do not
-    // let legacy application or model environment variables override it.
+    // Model selection is passed explicitly via --model; keep legacy model
+    // environment variables from overriding the CLI config.
     delete env.DWS_CODEX_MODEL;
     delete env.CODEX_MODEL;
     delete env.OPENAI_MODEL;

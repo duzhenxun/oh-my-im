@@ -3,18 +3,21 @@
  * 标题、加粗、列表、链接、引用和分割线等有限语法，**不支持 GitHub 风格的表格**。
  * 因此 Agent 输出的 `| a | b |` 表格会被原样显示成一堆竖线，在手机端尤其难读。
  *
- * 这里把表格块转换成移动端/桌面端都好读的列表结构：
+ * 这里把表格块转换成移动端/桌面端都好读的紧凑结构：行内用第一列序号 +
+ * 名称类列做强标题，其余字段用 ` ｜ ` 拼成一行；字段过多或过长时才退化成列表。
  *
- *   1 | ka古堡探秘 | act202605_gubao_tanmi | 09-05 ~ 09-27
+ *   | 排名 | 次数 | UID | 昵称 | 收礼主播 |
+ *   |---|---|---|---|---|
+ *   | 1 | 3 | 778339247 | 不语 | Dh·幽月 |
  *
  * 变成：
  *
- *   **1. ka古堡探秘**
- *   - module_name：act202605_gubao_tanmi
- *   - 时间：09-05 ~ 09-27
+ *   **1. 不语**
+ *   次数：3 ｜ UID：778339247 ｜ 收礼主播：Dh·幽月
  */
 
-const INDEX_HEADER = /^(#|序号|编号|no\.?|index|id)$/i;
+const INDEX_HEADER = /^(#|序号|编号|排名|名次|排位|no\.?|index|id|rank)$/i;
+const NAME_HEADER = /^(昵称|名称|名字|用户|用户名|用户昵称|主播|收礼主播|送礼用户|送礼人|项目|项目名|活动|活动名|name|user|nick|nickname|title)$/i;
 // 表格分隔行：支持 - / – / — 三种横线，以及可选的居中对齐冒号。
 const SEPARATOR_CELL = /^:?[-\u2013\u2014]{1,}:?$/;
 
@@ -35,23 +38,32 @@ function looksLikeTableRow(line: string): boolean {
 }
 
 function renderTable(header: string[], rows: string[][]): string {
-  // Prefer the first real column as the item title; a leading "#"/"序号" column
-  // is only used as a numeric prefix.
-  const titleIndex = header.findIndex((cell) => Boolean(cell) && !INDEX_HEADER.test(cell));
-  const index = titleIndex >= 0 ? titleIndex : 0;
-  const useIndexPrefix = index > 0;
+  // 序号列：优先识别常见的排序列，否则回退到第一列。
+  const indexColumn = header.findIndex((cell, column) => Boolean(cell) && INDEX_HEADER.test(cell));
+  // 标题列：优先用名称类列（昵称/项目等），否则用第一个非序号列。
+  let titleColumn = header.findIndex((cell, column) => column !== indexColumn && Boolean(cell) && NAME_HEADER.test(cell));
+  if (titleColumn < 0) titleColumn = header.findIndex((cell, column) => column !== indexColumn && Boolean(cell));
+  if (titleColumn < 0) titleColumn = indexColumn >= 0 ? indexColumn : 0;
+
   const blocks = rows.map((row) => {
-    const title = (row[index] ?? "").trim() || "(空)";
-    const prefix = useIndexPrefix && (row[0] ?? "").trim() ? `${(row[0] ?? "").trim()}. ` : "";
+    const title = (row[titleColumn] ?? "").trim() || "(空)";
+    const indexValue = indexColumn >= 0 ? (row[indexColumn] ?? "").trim() : "";
+    const prefix = indexColumn >= 0 && indexColumn !== titleColumn && indexValue ? `${indexValue}. ` : "";
     const lines = [`**${prefix}${title}**`];
+
+    const fields: string[] = [];
     header.forEach((name, column) => {
-      if (column === index) return;
-      // A leading index column is already shown as the title prefix.
-      if (useIndexPrefix && column === 0) return;
+      if (column === indexColumn || column === titleColumn) return;
       const value = (row[column] ?? "").trim();
       if (!value) return;
-      lines.push(`- ${name || `列${column + 1}`}：${value}`);
+      fields.push(`${name || `列${column + 1}`}：${value}`);
     });
+    if (fields.length > 0) {
+      const joined = fields.join(" ｜ ");
+      // 字段少且不长时并成一行，卡片更紧凑；否则退回列表便于逐条阅读。
+      if (fields.length <= 4 && joined.length <= 60) lines.push(joined);
+      else lines.push(...fields.map((field) => `- ${field}`));
+    }
     return lines.join("\n");
   });
   return blocks.join("\n\n");

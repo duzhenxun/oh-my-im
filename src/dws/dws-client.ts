@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { BotMatch, GroupMatch, GroupMember, UserMatch } from "./dws-dashboard.js";
+import type { BotMatch, GroupMatch, GroupMember, UserMatch } from "../dws-dashboard.js";
 
 export interface DwsMessageEvent {
   [key: string]: unknown;

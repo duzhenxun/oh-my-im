@@ -2,8 +2,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getCurrentDwsUser, searchRecentGroupMessages, type DwsMessageEvent } from "./dws-client.js";
-import type { DashboardConfig } from "./dws-dashboard.js";
-import { createLogger } from "./logger.js";
+import type { DashboardConfig } from "../dws-dashboard.js";
+import { createLogger } from "../core/logger.js";
 
 const log = createLogger("personal_history");
 const DEFAULT_INTERVAL_SECONDS = 15;

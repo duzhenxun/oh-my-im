@@ -1,5 +1,5 @@
 import type { AgentType } from "./config.js";
-import type { CommandKeywordsConfig, DashboardConfig, MonitorTarget } from "./dws-dashboard.js";
+import type { CommandKeywordsConfig, DashboardConfig, MonitorTarget } from "../dws-dashboard.js";
 
 export type MonitorCommand = "open" | "stop" | "pause" | { type: "switch-agent"; agent: AgentType };
 

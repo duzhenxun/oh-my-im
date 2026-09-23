@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { AgentCallbacks, AgentResult, AgentSessionInfo } from "./index.js";
-import type { Config } from "../config.js";
-import { createLogger } from "../logger.js";
+import type { Config } from "../core/config.js";
+import { createLogger } from "../core/logger.js";
 import { asObject, attachJsonlReader, createOpenCodeEnv, type JsonObject } from "./process-utils.js";
 
 const log = createLogger("OpenCode");

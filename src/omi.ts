@@ -5,7 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { readVersion } from "./version.js";
+import { readVersion } from "./core/version.js";
 
 type OmiMode = "bot" | "listen";
 

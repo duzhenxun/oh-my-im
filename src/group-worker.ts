@@ -5,9 +5,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { agentLabel, agentSwitchMessage, runAgent } from "./agents/index.js";
-import type { Config } from "./config.js";
-import { DingTalkCardClient, type CardReplyHandle } from "./dingtalk-card.js";
-import { applyMonitorCommand, parseMonitorCommand, type MonitorCommand } from "./monitor-command.js";
+import type { Config } from "./core/config.js";
+import { DingTalkCardClient, type CardReplyHandle } from "./dingtalk/dingtalk-card.js";
+import { DingTalkAiCardClient } from "./dingtalk/dingtalk-ai-card.js";
+import { AiCardSession } from "./dingtalk/ai-card.js";
+import { applyMonitorCommand, parseMonitorCommand, type MonitorCommand } from "./core/monitor-command.js";
 import {
   type DashboardConfig,
   type MonitorTarget,
@@ -32,14 +34,14 @@ import {
   searchBots,
   startGroupEventStream,
   type DwsMessageEvent,
-} from "./dws-client.js";
+} from "./dws/dws-client.js";
 import type { GroupMember } from "./dws-dashboard.js";
-import { createLogger } from "./logger.js";
-import { normalizeDingTalkMarkdown } from "./markdown.js";
-import { sendRobotGroupText, sendRobotWebhookText } from "./dingtalk-robot.js";
-import { runDwsJson } from "./dws-client.js";
-import { appendConversationLog } from "./conversation-log.js";
-import { startPersonalHistoryPolling } from "./dws-history.js";
+import { createLogger } from "./core/logger.js";
+import { normalizeDingTalkMarkdown } from "./dingtalk/markdown.js";
+import { sendRobotGroupText, sendRobotWebhookText } from "./dingtalk/dingtalk-robot.js";
+import { runDwsJson } from "./dws/dws-client.js";
+import { appendConversationLog } from "./core/conversation-log.js";
+import { startPersonalHistoryPolling } from "./dws/dws-history.js";
 
 const log = createLogger("group-worker");
 
@@ -63,6 +65,9 @@ async function sendRobotText(openConversationId: string, config: DashboardConfig
 }
 const DEFAULT_DWS_CODEX_TIMEOUT_MS = 300_000;
 const DWS_GROUP_MESSAGE_EVENT = "user_im_message_receive_group_all";
+// Shared AI card client. Credentials are (re)applied whenever the dashboard
+// config is loaded so the console template ID takes effect without a restart.
+const aiCardClient = new DingTalkAiCardClient();
 
 const DATA_DIR = join(homedir(), ".oh-my-im");
 const LEGACY_DATA_DIR = join(process.cwd(), ".oh-my-im");
@@ -70,6 +75,7 @@ const CONFIG_MIGRATION_FILE = join(DATA_DIR, ".config-location-v1");
 const LISTENER_LOCK_FILE = join(DATA_DIR, "group-worker.lock");
 const CARD_STATE_FILE = join(DATA_DIR, "dws-cards.json");
 const GROUP_SESSIONS_FILE = join(DATA_DIR, "group-sessions.json");
+const GROUP_AGENTS_FILE = join(DATA_DIR, "group-agents.json");
 const DASHBOARD_CONFIG_FILE = join(DATA_DIR, "dws-dashboard.json");
 const DASHBOARD_SERVER_CONFIG_FILE = join(DATA_DIR, "dws-dashboard-server.json");
 const REPLY_HISTORY_DIR = join(DATA_DIR, "replies");
@@ -99,6 +105,26 @@ async function saveGroupSessions(sessions: Map<string, string>): Promise<void> {
   const temporary = `${GROUP_SESSIONS_FILE}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(Object.fromEntries(sessions), null, 2)}\n`, "utf8");
   await rename(temporary, GROUP_SESSIONS_FILE);
+}
+
+// Agent 按群绑定：某群切了 Agent 不影响其他群，重启后每个群各自记住。
+let groupAgentBindings = new Map<string, Config["agent"]>();
+
+async function loadGroupAgents(): Promise<Map<string, Config["agent"]>> {
+  try {
+    const value = JSON.parse(await readFile(GROUP_AGENTS_FILE, "utf8")) as Record<string, unknown>;
+    return new Map(Object.entries(value).filter((entry): entry is [string, Config["agent"]] =>
+      entry[1] === "pi" || entry[1] === "codex" || entry[1] === "opencode"));
+  } catch {
+    return new Map();
+  }
+}
+
+async function saveGroupAgents(agents: Map<string, Config["agent"]>): Promise<void> {
+  await mkdir(DATA_DIR, { recursive: true });
+  const temporary = `${GROUP_AGENTS_FILE}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(Object.fromEntries(agents), null, 2)}\n`, "utf8");
+  await rename(temporary, GROUP_AGENTS_FILE);
 }
 
 interface DashboardServerConfig {
@@ -262,10 +288,10 @@ async function loadCardState(): Promise<CardState> {
       cards?: Record<string, PersistedCard | string>;
     };
     const cards = Object.fromEntries(
-      Object.entries(parsed.cards ?? {}).map(([groupId, card]) => [
-        groupId,
-        typeof card === "string" ? { cardBizId: card, status: "completed" } : card,
-      ]),
+      Object.entries(parsed.cards ?? {})
+        .map(([groupId, card]) => [groupId, typeof card === "string" ? { cardBizId: card, status: "completed" } : card] as const)
+        // 旧格式遗留的空条目（key 为 cardBizId/status 等、cardBizId 为空）直接丢弃。
+        .filter((entry): entry is readonly [string, PersistedCard] => Boolean(entry[1]?.cardBizId)),
     ) as Record<string, PersistedCard>;
     return { cards };
   } catch (err) {
@@ -296,7 +322,6 @@ function defaultBotAllowedUserIds(targets: MonitorTarget[]): string[] {
 
 function normalizeDashboardConfig(parsed: DashboardConfig): DashboardConfig {
   if (!Array.isArray(parsed.targets)) throw new Error("targets is invalid");
-  if (parsed.replyFormat !== "markdown" && parsed.replyFormat !== "plain") throw new Error("replyFormat is invalid");
   const targets = parsed.targets;
   const legacyModel = (parsed as DashboardConfig & { agentModel?: string }).agentModel?.trim() || "";
   const configuredModels = parsed.agentModels ?? { codex: "", pi: "", opencode: "" };
@@ -327,7 +352,7 @@ function normalizeDashboardConfig(parsed: DashboardConfig): DashboardConfig {
       : {},
     robotSenderOpenDingTalkId: parsed.robotSenderOpenDingTalkId?.trim() || "",
     agentModels: {
-      codex: "",
+      codex: configuredModels.codex?.trim() || "",
       pi: normalizeAgentModel("pi", configuredModels.pi?.trim() || (parsed.agent === "pi" ? legacyModel : "")),
       opencode: normalizeAgentModel("opencode", configuredModels.opencode?.trim() || (parsed.agent === "opencode" ? legacyModel : "")),
     },
@@ -336,6 +361,9 @@ function normalizeDashboardConfig(parsed: DashboardConfig): DashboardConfig {
       ? parsed.commandKeywords
       : structuredClone(EMPTY_COMMAND_KEYWORDS),
     groupPromptSuffix: promptSuffix,
+    aiCardTemplateId: typeof parsed.aiCardTemplateId === "string" ? parsed.aiCardTemplateId.trim() : "",
+    aiCardContentKey: (typeof parsed.aiCardContentKey === "string" ? parsed.aiCardContentKey.trim() : "") || "content",
+    aiCardStreamIntervalMs: Number.isFinite(parsed.aiCardStreamIntervalMs) ? Math.max(0, Math.min(60_000, Number(parsed.aiCardStreamIntervalMs))) : 500,
     robotName: parsed.robotName?.trim() || DEFAULT_ROBOT_NAME,
     clientId: parsed.clientId?.trim() || DEFAULT_DINGTALK_CLIENT_ID,
     clientSecret: parsed.clientSecret?.trim() || DEFAULT_DINGTALK_CLIENT_SECRET,
@@ -418,11 +446,13 @@ async function loadDashboardConfig(): Promise<DashboardConfig> {
     botSuperAdminUserIds: [],
     botSuperAdminUserNames: {},
     robotSenderOpenDingTalkId: "",
-    replyFormat: "markdown",
     agentModels: { codex: "", pi: "", opencode: "" },
     agent: "codex",
     commandKeywords: structuredClone(EMPTY_COMMAND_KEYWORDS),
     groupPromptSuffix: DEFAULT_GROUP_PROMPT_SUFFIX,
+    aiCardTemplateId: "",
+    aiCardContentKey: "content",
+    aiCardStreamIntervalMs: 500,
     robotName: DEFAULT_ROBOT_NAME,
     clientId: DEFAULT_DINGTALK_CLIENT_ID,
     clientSecret: DEFAULT_DINGTALK_CLIENT_SECRET,
@@ -616,16 +646,22 @@ async function handleMonitorCommand(
     senderId,
     senderName,
   };
+  if (typeof command === "object" && command.type === "switch-agent") {
+    // Agent 只绑定到当前群，不再改全局默认。
+    groupAgentBindings.set(groupId, command.agent);
+    await saveGroupAgents(groupAgentBindings);
+    if (sendReply) await sendRobotText(groupId, config, agentSwitchMessage(command.agent));
+    log.info(`monitor command=switch-agent:${command.agent} group=${groupId} replied=${sendReply}`);
+    return;
+  }
   const result = applyMonitorCommand(config, command, target);
   if (result.changed) await updateDashboardConfig(result.config);
 
-  const detail = typeof command === "object"
-    ? agentSwitchMessage(command.agent)
-    : command === "open"
-      ? `已开启 ${senderName} 在本群的AI 能力。`
-      : `已关闭 ${senderName} 在本群的AI 能力。`;
+  const detail = command === "open"
+    ? `已开启 ${senderName} 在本群的AI 能力。`
+    : `已关闭 ${senderName} 在本群的AI 能力。`;
   if (sendReply) await sendRobotText(groupId, config, detail);
-  log.info(`monitor command=${typeof command === "object" ? command.type + ":" + command.agent : command} group=${groupId} changed=${result.changed} replied=${sendReply}`);
+  log.info(`monitor command=${command} group=${groupId} changed=${result.changed} replied=${sendReply}`);
 }
 
 function senderDisplayName(event: DwsMessageEvent): string {
@@ -678,21 +714,15 @@ function configuredGroupIds(config: DashboardConfig): string[] {
   return Array.from(new Set(config.targets.map((target) => target.groupId)));
 }
 
-function formatReply(content: string, format: DashboardConfig["replyFormat"]): string {
+function formatReply(content: string): string {
   // DingTalk markdown has no table support; rewrite tables into readable lists
   // for both the card and the plain-text reply path.
-  const normalized = normalizeDingTalkMarkdown(content);
-  if (format === "markdown") return normalized;
-  return normalized.replace(/[\\`*_{}\[\]<>()#+\-.!|]/g, "\\$&");
+  return normalizeDingTalkMarkdown(content);
 }
 
-function completedCardContent(content: string, modelName: string, messageCount: number, toolStats: Record<string, number>, showDetails: boolean): string {
+function completionNote(modelName: string, messageCount: number, toolStats: Record<string, number>): string {
   const toolCount = Object.values(toolStats).reduce((total, count) => total + count, 0);
-  if (!showDetails) return content.trim() || "(无输出)";
-  return [
-    content.trim() || "(无输出)",
-    `[夯爆了] ${modelName || "默认模型"} ${messageCount}条消息 ${toolCount}次工具`,
-  ].join("\n\n\n");
+  return `${modelName || "默认模型"} ${messageCount}条消息,${toolCount}次工具`;
 }
 
 function batchQuestion(events: DwsMessageEvent[]): string {
@@ -911,22 +941,38 @@ async function handleBatch(
   // an already queued history/stream duplicate must not create a new card
   // after the stopped card has been finalized.
   const dashboardConfig = getDashboardConfig();
-  const responseMode = dashboardConfig.responseMode ?? "card";
-  const agent = dashboardConfig.agent;
+  const requestedMode = dashboardConfig.responseMode ?? "card";
+  const aiTemplateId = dashboardConfig.aiCardTemplateId?.trim() || "";
+  const aiContentKey = dashboardConfig.aiCardContentKey?.trim() || "content";
+  const aiStreamIntervalMs = Number.isFinite(dashboardConfig.aiCardStreamIntervalMs)
+    ? Math.max(0, Number(dashboardConfig.aiCardStreamIntervalMs))
+    : 500;
+  // AI card needs a template ID and app credentials. Without them fall back to
+  // the standard card so a missing configuration never breaks replies.
+  let useAiCard = requestedMode === "aiCard" && Boolean(aiTemplateId) && aiCardClient.configured;
+  if (requestedMode === "aiCard" && !useAiCard) {
+    log.warn(`AI card unavailable (template=${aiTemplateId ? "set" : "empty"}, credentials=${aiCardClient.configured}); using standard card`);
+  }
+  const responseMode: "card" | "text" = requestedMode === "text" ? "text" : "card";
+  const agent = groupAgentBindings.get(groupId) ?? dashboardConfig.agent;
   const workDir = groupWorkDir(groupId, dashboardConfig, events[0]);
   const agentConfig = codexConfig(workDir);
   agentConfig.agent = agent;
-    agentConfig.agentModel = agent === "pi" || agent === "opencode" ? dashboardConfig.agentModels[agent] || undefined : undefined;
+    agentConfig.agentModel = agent === "pi" || agent === "opencode" || agent === "codex" ? dashboardConfig.agentModels[agent] || undefined : undefined;
   const modelName = agentConfig.agentModel?.trim().split("/").pop() || "";
-  const label = `${agentLabel(agent)} Agent`;
-  const processingLabel = agent === "codex" ? `${agentLabel(agent)} Agent` : `${agentLabel(agent)} ${modelName || "默认模型"}`;
+  const label = agentLabel(agent);
+  const processingLabel = `${agentLabel(agent)} ${modelName || "默认模型"}`;
   const processingMessage = `[OMG] ${processingLabel} 正在分析...`;
   const sessionKey = `${agent}:${groupId}:${workDir}`;
   const sessionId = sessions.get(sessionKey);
   log.info(
     `processing batch size=${events.length} groupSession=${sessionId ? "resume" : "new"}`,
   );
-  let card: CardReplyHandle | undefined;
+  type ActiveGroupCard =
+    | { kind: "card"; handle: CardReplyHandle }
+    | { kind: "aiCard"; session: AiCardSession };
+  const cardIdentity = (value: ActiveGroupCard): string => value.kind === "aiCard" ? value.session.outTrackId : value.handle.cardBizId;
+  let card: ActiveGroupCard | undefined;
   let stopCardUpdates = (): void => undefined;
   let latestVisibleContent = `${label} 正在处理...`;
   let elapsedTimer: ReturnType<typeof setInterval> | undefined;
@@ -949,12 +995,42 @@ async function handleBatch(
   // The setting only controls the live processing title. Completion always
   // includes the elapsed time as a useful final result summary.
   const finishedTitle = (icon: string, state: string) => `${icon} ${title}${state} 总耗时 ${formatElapsed()}`;
+  // Push a card snapshot. AI cards stream full markdown via the streaming API;
+  // standard cards use the cardBizId update API. AI card failures are
+  // best-effort and must never fail the agent task.
+  const pushCard = async (target: ActiveGroupCard, title: string, content: string): Promise<void> => {
+    if (target.kind === "aiCard") {
+      await target.session.push(formatReply(content));
+      return;
+    }
+    await cardClient.update(target.handle, title, formatReply(content));
+  };
+  const finishCard = async (target: ActiveGroupCard, title: string, content: string, state: "completed" | "paused" | "failed", endText?: string): Promise<void> => {
+    if (target.kind === "aiCard") {
+      const stateLabel = state === "completed" ? "完成" : state === "paused" ? "处理暂停" : "处理失败";
+      const statusTitle = `【${label}】${stateLabel} 总耗时 ${formatElapsed()}`;
+      const delivered = await target.session.finish({
+        content: formatReply(content),
+        title: statusTitle,
+        endText: endText ? formatReply(endText) : undefined,
+        error: state !== "completed",
+      });
+      // 流式接口完全失败时发一条文本，保证用户仍能拿到结果。
+      if (!delivered && state === "completed") {
+        await sendRobotText(groupId, getDashboardConfig(), formatReply(`${content}\n\n总耗时 ${formatElapsed()}`))
+          .catch((sendErr) => log.warn(`AI card text fallback failed: ${String(sendErr)}`));
+      }
+      return;
+    }
+    const cardContent = state === "completed" && endText ? `${content}\n\n\n[夯爆了] ${endText}` : content;
+    await cardClient.update(target.handle, title, formatReply(cardContent));
+  };
   try {
     const storedCard = cardState.cards[groupId];
-    if (responseMode === "card" && storedCard?.status === "processing") {
-      card = { groupId, cardBizId: storedCard.cardBizId };
+    if (responseMode === "card" && storedCard?.status === "processing" && !useAiCard) {
+      card = { kind: "card", handle: { groupId, cardBizId: storedCard.cardBizId } };
       try {
-        await cardClient.update(card, processingTitle(), processingMessage);
+        await cardClient.update(card.handle, processingTitle(), processingMessage);
       } catch (err) {
         if (!isMissingCardError(err)) throw err;
         log.warn(`stored card is unavailable; creating a replacement: ${String(err)}`);
@@ -962,10 +1038,44 @@ async function handleBatch(
         card = undefined;
       }
     }
+    if (responseMode === "card" && useAiCard && storedCard?.status === "processing") {
+      // A previous AI card was left in the "输入中" state by a restart. Close it
+      // as an error so it does not stay in the typing state forever.
+      const staleSession = new AiCardSession({
+        client: aiCardClient,
+        templateId: aiTemplateId,
+        contentKey: aiContentKey,
+        log,
+        outTrackId: storedCard.cardBizId,
+      });
+      await staleSession.closeStale();
+      delete cardState.cards[groupId];
+    }
     if (responseMode === "card" && !card) {
-      const cardBizId = randomUUID();
-      card = await cardClient.create(groupId, cardBizId, processingTitle(), processingMessage);
-      cardState.cards[groupId] = { cardBizId, status: "processing" };
+      const cardId = randomUUID();
+      if (useAiCard) {
+        try {
+          const session = new AiCardSession({
+            client: aiCardClient,
+            templateId: aiTemplateId,
+            contentKey: aiContentKey,
+            log,
+            outTrackId: cardId,
+          });
+          await session.openForGroup({
+            openConversationId: groupId,
+            title: `【${label}】${modelName || "默认模型"} 进行中...`,
+          });
+          card = { kind: "aiCard", session };
+        } catch (err) {
+          log.warn(`AI card create failed; falling back to standard card: ${String(err)}`);
+          useAiCard = false;
+          card = { kind: "card", handle: await cardClient.create(groupId, cardId, processingTitle(), processingMessage) };
+        }
+      } else {
+        card = { kind: "card", handle: await cardClient.create(groupId, cardId, processingTitle(), processingMessage) };
+      }
+      cardState.cards[groupId] = { cardBizId: cardId, status: "processing" };
       await saveCardState(cardState);
     }
     if (responseMode === "text") await sendRobotText(groupId, getDashboardConfig(), processingMessage);
@@ -999,9 +1109,10 @@ async function handleBatch(
       pendingCardTimer = undefined;
       pendingCardUpdate = undefined;
     };
-    // Pi emits very small deltas quickly. Coalesce them into one complete card
-    // snapshot per second so DingTalk receives fresh content without a backlog.
-    const getCardIntervalMs = () => getDashboardConfig().cardUpdateIntervalMs;
+    // Pi emits very small deltas quickly. Coalesce them into one snapshot so
+    // DingTalk receives fresh content without a backlog. AI cards use their own
+    // (usually faster) typing interval.
+    const getCardIntervalMs = () => useAiCard ? aiStreamIntervalMs : getDashboardConfig().cardUpdateIntervalMs;
     const pumpCardUpdate = () => {
       if (cardUpdatesStopped || cardUpdateInFlight || !pendingCardUpdate) return;
       if (getCardIntervalMs() <= 0) {
@@ -1025,7 +1136,7 @@ async function handleBatch(
       pendingCardUpdate = undefined;
       if (!activeCard) return;
       lastCardUpdateAt = Date.now();
-      cardUpdateInFlight = cardClient.update(activeCard, latest.title, formatReply(latest.content, getDashboardConfig().replyFormat))
+      cardUpdateInFlight = pushCard(activeCard, latest.title, latest.content)
         .catch((err) => log.warn(`card update skipped: ${String(err)}`))
         .finally(() => {
           cardUpdateInFlight = undefined;
@@ -1043,7 +1154,7 @@ async function handleBatch(
       if (pendingCardUpdate && !cardUpdatesStopped && activeCard) {
         const latest = pendingCardUpdate;
         pendingCardUpdate = undefined;
-        await cardClient.update(activeCard, latest.title, formatReply(latest.content, getDashboardConfig().replyFormat))
+        await pushCard(activeCard, latest.title, latest.content)
           .catch((err) => log.warn(`card update skipped: ${String(err)}`));
       }
     };
@@ -1053,7 +1164,7 @@ async function handleBatch(
       pendingCardUpdate = { title, content };
       pumpCardUpdate();
     };
-    if (responseMode === "card") {
+    if (responseMode === "card" && !useAiCard) {
       elapsedTimer = setInterval(() => {
         updateCard(processingTitle(), liveReply.content.slice(-8_000));
       }, 1_000);
@@ -1065,11 +1176,12 @@ async function handleBatch(
       onAbortReady: (abort) => { if (queue) queue.abort = abort; },
       onSteerReady: (steer) => { if (queue && agent === "pi") queue.steer = steer; },
       onToolUse: (toolName, stats) => {
-        log.info(`codex tool=${toolName} count=${stats[toolName] ?? 1}`);
-        toolStatus = `[OMG] 调用工具：${toolName} x${stats[toolName] ?? 1}`;
-        liveReply.content = streamedText ? `${streamedText}\n\n\n${toolStatus}` : toolStatus;
-        latestVisibleContent = liveReply.content;
-        updateCard(processingTitle(), liveReply.content);
+        const totalCalls = Object.values(stats).reduce((sum, count) => sum + (count || 0), 0);
+        log.info(`tool=${toolName} total=${totalCalls}`);
+        // AI 卡片在工具调用/等待期显示实时调用次数，出字后清除。
+        if (!useAiCard) return;
+        toolStatus = `[OMG] 正在调用工具（已 ${totalCalls} 次）…`;
+        updateCard(processingTitle(), streamedText ? `${streamedText}\n\n${toolStatus}` : toolStatus);
       },
       onText: (text) => {
         streamedText = text;
@@ -1095,14 +1207,13 @@ async function handleBatch(
       await saveGroupSessions(sessions);
     }
     await flushPendingCardUpdate();
-    const replyText = formatReply(
-      completedCardContent(result.text, modelName, events.length, result.toolStats, getDashboardConfig().showProcessingDetails),
-      getDashboardConfig().replyFormat,
-    );
-    if (responseMode === "card" && activeCard) await cardClient.update(activeCard, finishedTitle("✅", "完成"), replyText);
-    else await sendRobotText(groupId, getDashboardConfig(), replyText);
+    const showDetails = getDashboardConfig().showProcessingDetails;
+    const note = showDetails ? completionNote(modelName, events.length, result.toolStats) : undefined;
+    const completedContent = result.text.trim() || "(无输出)";
+    if (responseMode === "card" && activeCard) await finishCard(activeCard, finishedTitle("✅", "完成"), completedContent, "completed", note);
+    else await sendRobotText(groupId, getDashboardConfig(), formatReply(note ? `${completedContent}\n\n\n[夯爆了] ${note}` : completedContent));
     liveReplies.delete(groupId);
-      if (activeCard) cardState.cards[groupId] = { cardBizId: activeCard.cardBizId, status: "completed" };
+    if (activeCard) cardState.cards[groupId] = { cardBizId: cardIdentity(activeCard), status: "completed" };
     await saveCardState(cardState);
     await recordReply(replies, {
       id: randomUUID(),
@@ -1143,9 +1254,9 @@ async function handleBatch(
       // paused/failed card update. This prevents a queued update from arriving
       // after stop and changing the title back to "处理中".
       stopCardUpdates();
-      await cardClient.update(card, stopped ? finishedTitle("🔴", "处理暂停") : finishedTitle("❌", "处理失败"), stopped ? stoppedContent : `${label} 处理失败：${message.slice(0, 2_000)}`)
+      await finishCard(card, stopped ? finishedTitle("🔴", "处理暂停") : finishedTitle("❌", "处理失败"), stopped ? stoppedContent : `${label} 处理失败：${message.slice(0, 2_000)}`, stopped ? "paused" : "failed")
         .catch((updateErr) => log.warn(`card failure update skipped: ${String(updateErr)}`));
-      cardState.cards[groupId] = { cardBizId: card.cardBizId, status: stopped ? "failed" : "failed" };
+      cardState.cards[groupId] = { cardBizId: cardIdentity(card), status: stopped ? "failed" : "failed" };
       await saveCardState(cardState);
       await recordReply(replies, {
         id: randomUUID(),
@@ -1201,7 +1312,7 @@ async function enqueueGroupEvent(
     if (queue.activeAgent === "pi" && queue.steer && content) {
       const steered = queue.steer(content);
       if (steered) {
-        void sendRobotText(groupId, getDashboardConfig(), "[灵感]已将这条消息作为引导发送给当前 Pi 任务。")
+        void sendRobotText(groupId, getDashboardConfig(), "[灵感] 已将这条消息作为引导发送给当前 Pi 任务。")
           .catch((err) => log.warn(`steer acknowledgement failed: ${String(err)}`));
         log.info(`steered message=${event.message_id || "unknown"} group=${groupId}`);
         return;
@@ -1303,7 +1414,7 @@ function startGroupListener(
     // metadata is complete. Never feed our own steer acknowledgement back into
     // the active Pi task, even if robot detection missed that event.
     const eventContent = (event.content || event.text || "").trim();
-    if (queues.get(groupId)?.running && /^\[灵感\]已将这条消息作为引导发送给当前 Pi 任务[。.!！]?$/u.test(eventContent)) {
+    if (queues.get(groupId)?.running && /^\[灵感\] 已将这条消息作为引导发送给当前 Pi 任务[。.!！]?$/u.test(eventContent)) {
       log.debug(`ignored self steer acknowledgement group=${groupId}`);
       return;
     }
@@ -1414,9 +1525,7 @@ function startGroupListener(
     if (options.commandsOnly && command !== "open" && command !== "stop") return;
     if (options.commandsOnly && !command) return;
     if (command) {
-      // Agent switching is scoped to an existing "group + sender" monitor
-      // rule. Group robot membership is checked asynchronously below before
-      // changing the shared agent setting.
+      // Agent 切换只影响当前群（每个群在 group-agents.json 各自保存）。
       if (typeof command === "object" && command.type === "switch-agent" && !acceptsTarget(event, config)) {
         log.debug(`ignored agent switch outside monitor rule group=${groupId} sender=${getSenderId(event)}`);
         return;
@@ -1591,6 +1700,7 @@ async function main(): Promise<void> {
   const queues = new Map<string, GroupQueue>();
   const cardState = await loadCardState();
   const sessions = await loadGroupSessions();
+  groupAgentBindings = await loadGroupAgents();
   const cardClient = new DingTalkCardClient();
   let dashboardConfig = await loadDashboardConfig();
   const applyDashboardConfig = async (config: DashboardConfig): Promise<void> => {
@@ -1598,11 +1708,13 @@ async function main(): Promise<void> {
     dashboardConfig = config;
     cardClient.setCredentials(config.clientId, config.clientSecret);
     cardClient.setRobotCode(config.clientId);
+    aiCardClient.setCredentials(config.clientId, config.clientSecret, config.clientId);
     log.info(`dashboard config applied: ${configuredGroupIds(config).length} group(s), ${config.targets.length} rule(s)`);
   };
   await saveDashboardConfig(dashboardConfig);
   cardClient.setCredentials(dashboardConfig.clientId, dashboardConfig.clientSecret);
   cardClient.setRobotCode(dashboardConfig.clientId);
+  aiCardClient.setCredentials(dashboardConfig.clientId, dashboardConfig.clientSecret, dashboardConfig.clientId);
   // Warm the group-bot cache for every monitored group so a message from any
   // AI robot in the group is ignored from the very first event.
   void Promise.all(configuredGroupIds(dashboardConfig).map((groupId) => refreshGroupBotCache(groupId, true)));
@@ -1627,6 +1739,7 @@ async function main(): Promise<void> {
       dashboardConfig = latest;
       cardClient.setCredentials(latest.clientId, latest.clientSecret);
       cardClient.setRobotCode(latest.clientId);
+      aiCardClient.setCredentials(latest.clientId, latest.clientSecret, latest.clientId);
       log.info(`dashboard config reloaded: ${configuredGroupIds(latest).length} group(s), ${latest.targets.length} rule(s)`);
     }).catch((err) => log.warn(`dashboard config reload failed: ${String(err)}`));
   }, 1_000);

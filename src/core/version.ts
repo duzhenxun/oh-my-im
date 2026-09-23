@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
  * through here instead of parsing package.json on their own, and callers can
  * read it again after an in-place upgrade so they never report a stale value.
  */
-const packageFile = join(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+const packageFile = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json");
 
 export function readVersion(): string {
   try {

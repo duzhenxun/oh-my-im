@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
 import { DWClient, TOPIC_ROBOT, type DWClientDownStream, type RobotMessage } from "dingtalk-stream";
-import type { Config } from "./config.js";
-import { createLogger } from "./logger.js";
+import type { Config } from "../core/config.js";
+import { createLogger } from "../core/logger.js";
 
 export interface DingTalkAttachment {
   type: "picture" | "audio" | "video" | "file";

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { normalizeAgentModel, type AgentModels } from "./dws-dashboard.js";
+import { normalizeAgentModel, type AgentModels } from "../dws-dashboard.js";
 
 export type AgentType = "codex" | "pi" | "opencode";
 
@@ -66,11 +66,11 @@ export function loadConfig(): Config {
     codexCliPath: "codex",
     codexWorkDir: resolveWorkDir(),
     agentModels: {
-      codex: "",
+      codex: resolveAgentModel("codex", local.agentModels, local.agent, local.agentModel) || "",
       pi: resolveAgentModel("pi", local.agentModels, local.agent, local.agentModel) || "",
       opencode: resolveAgentModel("opencode", local.agentModels, local.agent, local.agentModel) || "",
     },
-    agentModel: local.agent === "pi" || local.agent === "opencode"
+    agentModel: local.agent === "pi" || local.agent === "opencode" || local.agent === "codex"
       ? resolveAgentModel(local.agent, local.agentModels, local.agent, local.agentModel)
       : undefined,
     codexPermissionMode: "bypass",
