@@ -136,7 +136,7 @@ async function loadServerConfig(): Promise<{ port: number; host: string }> {
     const value = JSON.parse(await readFile(serverFile, "utf8")) as { port?: number; host?: string };
     if (Number.isInteger(value.port) && value.port! > 0 && typeof value.host === "string") return { port: value.port!, host: value.host };
   } catch { /* use defaults */ }
-  const config = { port: 12525, host: "127.0.0.1" };
+  const config = { port: 25252, host: "127.0.0.1" };
   await mkdir(dataDir, { recursive: true });
   await writeFile(serverFile, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   return config;

@@ -9,6 +9,7 @@ import type { Config } from "./core/config.js";
 import { DingTalkCardClient, type CardReplyHandle } from "./dingtalk/dingtalk-card.js";
 import { DingTalkAiCardClient } from "./dingtalk/dingtalk-ai-card.js";
 import { AiCardSession } from "./dingtalk/ai-card.js";
+import { DingTalkRobotEmotionClient, THINKING_EMOTION } from "./dingtalk/robot-emotion.js";
 import { applyMonitorCommand, parseMonitorCommand, type MonitorCommand } from "./core/monitor-command.js";
 import {
   type DashboardConfig,
@@ -68,6 +69,8 @@ const DWS_GROUP_MESSAGE_EVENT = "user_im_message_receive_group_all";
 // Shared AI card client. Credentials are (re)applied whenever the dashboard
 // config is loaded so the console template ID takes effect without a restart.
 const aiCardClient = new DingTalkAiCardClient();
+// 普通消息模式用机器人贴表情代替额外的「正在分析...」消息。
+const robotEmotionClient = new DingTalkRobotEmotionClient();
 
 const DATA_DIR = join(homedir(), ".oh-my-im");
 const LEGACY_DATA_DIR = join(process.cwd(), ".oh-my-im");
@@ -246,6 +249,15 @@ function eventKey(event: DwsMessageEvent, groupId: string): string | undefined {
     return `${groupId}:fallback:${senderId}:${createdAt}:${content}`;
   }
   return undefined;
+}
+
+/** 批次里最后一条消息的 openMsgId；贴表情时用最新一条最直观。 */
+function latestOpenMsgId(events: DwsMessageEvent[]): string {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const messageId = events[index].message_id || events[index].messageId || events[index].openMessageId;
+    if (typeof messageId === "string" && messageId.trim()) return messageId.trim();
+  }
+  return "";
 }
 
 function eventGroupId(event: DwsMessageEvent): string | undefined {
@@ -484,7 +496,7 @@ async function loadDashboardServerConfig(): Promise<DashboardServerConfig> {
   } catch (err) {
     const code = err && typeof err === "object" && "code" in err ? err.code : undefined;
     if (code !== "ENOENT") log.warn(`dashboard server config ignored: ${String(err)}`);
-    const config: DashboardServerConfig = { port: 12525, host: "127.0.0.1" };
+    const config: DashboardServerConfig = { port: 25252, host: "127.0.0.1" };
     await saveDashboardServerConfig(config);
     return config;
   }
@@ -963,6 +975,18 @@ async function handleBatch(
   const label = agentLabel(agent);
   const processingLabel = `${agentLabel(agent)} ${modelName || "默认模型"}`;
   const processingMessage = `[OMG] ${processingLabel} 正在分析...`;
+  // 普通消息模式：用机器人「思考」表情代替额外的处理中消息（贴完就保留，不撤回）。
+  const emotionOpenMsgId = latestOpenMsgId(events);
+  const emotionTarget = emotionOpenMsgId ? { openConversationId: groupId, openMsgId: emotionOpenMsgId } : undefined;
+  const applyThinkingEmotion = async (): Promise<void> => {
+    if (responseMode !== "text" || !emotionTarget || !robotEmotionClient.configured) return;
+    try {
+      await robotEmotionClient.add(emotionTarget, THINKING_EMOTION);
+    } catch (err) {
+      log.warn(`robot thinking emotion skipped: ${err instanceof Error ? err.message : String(err)}`);
+      await sendRobotText(groupId, getDashboardConfig(), formatReply(processingMessage)).catch(() => undefined);
+    }
+  };
   const sessionKey = `${agent}:${groupId}:${workDir}`;
   const sessionId = sessions.get(sessionKey);
   log.info(
@@ -1078,7 +1102,7 @@ async function handleBatch(
       cardState.cards[groupId] = { cardBizId: cardId, status: "processing" };
       await saveCardState(cardState);
     }
-    if (responseMode === "text") await sendRobotText(groupId, getDashboardConfig(), processingMessage);
+    if (responseMode === "text") await applyThinkingEmotion();
     const activeCard = card;
     const liveReply: ReplyRecord = {
       id: randomUUID(),
@@ -1178,10 +1202,12 @@ async function handleBatch(
       onToolUse: (toolName, stats) => {
         const totalCalls = Object.values(stats).reduce((sum, count) => sum + (count || 0), 0);
         log.info(`tool=${toolName} total=${totalCalls}`);
-        // AI 卡片在工具调用/等待期显示实时调用次数，出字后清除。
-        if (!useAiCard) return;
+        // 处理中显示实时工具调用信息（AI 卡片与普通卡片都一样），出字后清除。
         toolStatus = `[OMG] 正在调用工具（已 ${totalCalls} 次）…`;
-        updateCard(processingTitle(), streamedText ? `${streamedText}\n\n${toolStatus}` : toolStatus);
+        const content = streamedText ? `${streamedText}\n\n${toolStatus}` : toolStatus;
+        latestVisibleContent = content;
+        liveReply.content = content;
+        updateCard(processingTitle(), content);
       },
       onText: (text) => {
         streamedText = text;
@@ -1709,12 +1735,14 @@ async function main(): Promise<void> {
     cardClient.setCredentials(config.clientId, config.clientSecret);
     cardClient.setRobotCode(config.clientId);
     aiCardClient.setCredentials(config.clientId, config.clientSecret, config.clientId);
+    robotEmotionClient.setCredentials(config.clientId, config.clientSecret, config.clientId);
     log.info(`dashboard config applied: ${configuredGroupIds(config).length} group(s), ${config.targets.length} rule(s)`);
   };
   await saveDashboardConfig(dashboardConfig);
   cardClient.setCredentials(dashboardConfig.clientId, dashboardConfig.clientSecret);
   cardClient.setRobotCode(dashboardConfig.clientId);
   aiCardClient.setCredentials(dashboardConfig.clientId, dashboardConfig.clientSecret, dashboardConfig.clientId);
+  robotEmotionClient.setCredentials(dashboardConfig.clientId, dashboardConfig.clientSecret, dashboardConfig.clientId);
   // Warm the group-bot cache for every monitored group so a message from any
   // AI robot in the group is ignored from the very first event.
   void Promise.all(configuredGroupIds(dashboardConfig).map((groupId) => refreshGroupBotCache(groupId, true)));
@@ -1740,6 +1768,7 @@ async function main(): Promise<void> {
       cardClient.setCredentials(latest.clientId, latest.clientSecret);
       cardClient.setRobotCode(latest.clientId);
       aiCardClient.setCredentials(latest.clientId, latest.clientSecret, latest.clientId);
+      robotEmotionClient.setCredentials(latest.clientId, latest.clientSecret, latest.clientId);
       log.info(`dashboard config reloaded: ${configuredGroupIds(latest).length} group(s), ${latest.targets.length} rule(s)`);
     }).catch((err) => log.warn(`dashboard config reload failed: ${String(err)}`));
   }, 1_000);

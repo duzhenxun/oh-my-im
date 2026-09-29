@@ -24,7 +24,7 @@
 DWS 群事件 ── DWS CLI ──> group-worker ──┘
                                          └─> 钉钉文本 / StandardCard / AI 卡片
 
-dashboard-worker ──> http://127.0.0.1:12525
+dashboard-worker ──> http://127.0.0.1:25252
 ```
 
 默认启动会运行三个独立 worker：
@@ -99,7 +99,7 @@ npm start
 启动后打开管理页：
 
 ```text
-http://127.0.0.1:12525
+http://127.0.0.1:25252
 ```
 
 首次安装建议按以下顺序配置：
@@ -161,7 +161,7 @@ omi
 
 ## 管理页配置
 
-管理页默认只绑定 `127.0.0.1`，默认端口为 `12525`。可配置内容包括：
+管理页默认只绑定 `127.0.0.1`，默认端口为 `25252`。可配置内容包括：
 
 - 默认 Agent：Codex、Pi 或 OpenCode，以及各自可选的模型名（也支持在会话中用关键词切换，切换结果按会话保存）。
 - 钉钉应用凭证、机器人名称、机器人发送者 ID。
@@ -295,7 +295,7 @@ npm test
 
 ### 管理页打不开
 
-确认已经执行 `npm run build`，再运行 `omi status` 查看 dashboard worker 和日志路径。默认地址是 `127.0.0.1:12525`；端口被占用时，修改 `~/.oh-my-im/dws-dashboard-server.json` 后重启。
+确认已经执行 `npm run build`，再运行 `omi status` 查看 dashboard worker 和日志路径。默认地址是 `127.0.0.1:25252`；端口被占用时，修改 `~/.oh-my-im/dws-dashboard-server.json` 后重启。
 
 ### 单聊没有响应
 

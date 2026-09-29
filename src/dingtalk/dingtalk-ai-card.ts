@@ -31,9 +31,9 @@ export class DingTalkAiCardClient {
   private clientId = "";
   private clientSecret = "";
   private robotCode = "";
-  // Last streamed content length per card, used to type out content that the
-  // agent produced in one burst instead of as incremental deltas.
-  private readonly streamedLengths = new Map<string, number>();
+  // 每张卡片最后一次推送出去的完整内容。除了「补打字机」之外，还用来判断内容
+  // 是否真的发生变化：长度不变但内容变了（如工具调用计数刷新）也必须推送。
+  private readonly streamedContents = new Map<string, string>();
 
   setCredentials(clientId: string, clientSecret: string, robotCode?: string): void {
     const nextClientId = clientId.trim();
@@ -118,8 +118,8 @@ export class DingTalkAiCardClient {
       isFinalize: params.isFinalize === true,
       isError: params.isError === true,
     });
-    this.streamedLengths.set(params.outTrackId, params.content.length);
-    if (params.isFinalize || params.isError) this.streamedLengths.delete(params.outTrackId);
+    this.streamedContents.set(params.outTrackId, params.content);
+    if (params.isFinalize || params.isError) this.streamedContents.delete(params.outTrackId);
   }
 
   /**
@@ -133,16 +133,27 @@ export class DingTalkAiCardClient {
     maxFrames?: number;
     maxDurationMs?: number;
   }): Promise<void> {
-    const already = this.streamedLengths.get(params.outTrackId) ?? 0;
-    if (params.content.length <= already + 1) return;
-    const remaining = params.content.length - already;
+    const previous = this.streamedContents.get(params.outTrackId) ?? "";
+    const content = params.content;
+    // 内容没变就跳过；长度不变但内容变了（例如工具计数从 1 变成 2）不能丢，
+    // 必须原样推送，否则卡片上的处理中信息会停在旧值。
+    if (content === previous) return;
+    const streamFull = (value: string) => this.stream({ outTrackId: params.outTrackId, contentKey: params.contentKey, content: value });
+    if (!content.startsWith(previous) || content.length <= previous.length + 1) {
+      await streamFull(content);
+      return;
+    }
+    const remaining = content.length - previous.length;
     const frames = Math.max(1, Math.min(params.maxFrames ?? 8, remaining));
     const step = Math.max(1, Math.ceil(remaining / frames));
     const delayMs = Math.max(0, Math.floor((params.maxDurationMs ?? 1_200) / frames));
-    for (let end = already + step; end < params.content.length; end += step) {
-      await this.stream({ outTrackId: params.outTrackId, contentKey: params.contentKey, content: params.content.slice(0, end) });
+    for (let end = previous.length + step; end < content.length; end += step) {
+      await streamFull(content.slice(0, end));
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
+    // 补帧只推中间态，最后一帧必须补上完整内容，否则卡片会停在截断的文本上
+    // （例如「工具：re…」）。
+    await streamFull(content);
   }
 
   /**

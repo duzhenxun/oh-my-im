@@ -8,6 +8,7 @@ import { createLogger } from "./core/logger.js";
 import { normalizeDingTalkMarkdown } from "./dingtalk/markdown.js";
 import { DingTalkAiCardClient } from "./dingtalk/dingtalk-ai-card.js";
 import { AiCardSession } from "./dingtalk/ai-card.js";
+import { DingTalkRobotEmotionClient, THINKING_EMOTION } from "./dingtalk/robot-emotion.js";
 import type { CommandKeywordsConfig } from "./dws-dashboard.js";
 import type { ResponseMode } from "./dws-dashboard.js";
 import { parseAgentControlCommand } from "./core/monitor-command.js";
@@ -255,6 +256,12 @@ function buildCardContent(content: string, note?: string): string {
   const safeContent = normalizeDingTalkMarkdown(content).trim() || "[OMG] 正在分析...";
   const safeNote = note?.trim();
   return safeNote ? `${safeContent}\n\n\n${safeNote}` : safeContent;
+}
+
+function formatStats(stats: Record<string, number>): string {
+  const entries = Object.entries(stats);
+  if (entries.length === 0) return "";
+  return entries.map(([name, count]) => `${name} x${count}`).join(", ");
 }
 
 function describeAttachment(attachment: DownloadedAttachment): string {
@@ -614,6 +621,8 @@ export async function runApp(
   const bot = new DingTalkBot(config);
   const aiCardClient = new DingTalkAiCardClient();
   aiCardClient.setCredentials(config.dingtalkClientId, config.dingtalkClientSecret, config.dingtalkClientId);
+  const robotEmotionClient = new DingTalkRobotEmotionClient();
+  robotEmotionClient.setCredentials(config.dingtalkClientId, config.dingtalkClientSecret, config.dingtalkClientId);
   const conversations = new Map<string, ConversationState>();
   // Stream callbacks can still be redelivered when an ACK is lost, and DWS /
   // history paths may surface the same content twice. Without message-level
@@ -804,6 +813,19 @@ export async function runApp(
       log.warn(`AI card unavailable (template=${aiCardConfig.templateId ? "set" : "empty"}, credentials=${aiCardClient.configured}); using standard card`);
     }
     const responseMode: "card" | "text" = requestedMode === "text" ? "text" : "card";
+    // 普通消息模式下不再单独发一条「正在分析...」，而是由机器人在用户消息上
+    // 贴一个「思考」表情，整个过程只发最终回复这一条消息。
+    const emotionTarget = message.msgId ? { openConversationId: message.conversationId, openMsgId: message.msgId } : undefined;
+    const applyThinkingEmotion = async (): Promise<void> => {
+      if (responseMode !== "text" || !emotionTarget || !robotEmotionClient.configured) return;
+      try {
+        await robotEmotionClient.add(emotionTarget, THINKING_EMOTION);
+      } catch (err) {
+        log.warn(`robot thinking emotion skipped: ${err instanceof Error ? err.message : String(err)}`);
+        // 表情贴不上时退回原来的处理中消息，避免用户看不到任何反馈。
+        await bot.sendText(message.conversationId, processingMessage).catch(() => undefined);
+      }
+    };
     let aiCardSession: AiCardSession | undefined;
     let reply: DingTalkReplyHandle;
     if (responseMode === "card") {
@@ -833,7 +855,7 @@ export async function runApp(
     } else {
       reply = { conversationId: message.conversationId, mode: "text" as const };
     }
-    if (responseMode === "text") await bot.sendText(message.conversationId, processingMessage);
+    if (responseMode === "text") await applyThinkingEmotion();
     let elapsedTimer: ReturnType<typeof setInterval> | undefined;
     let latestCardContent = processingMessage;
     const agent = selectedAgent;
@@ -842,6 +864,7 @@ export async function runApp(
     try {
       let streamedText = "";
       let toolStatus = "";
+      let latestStats: Record<string, number> = {};
       let lastUpdateAt = 0;
       let pendingUpdate: ReturnType<typeof setTimeout> | undefined;
       let cardUpdatesStopped = false;
@@ -917,16 +940,19 @@ export async function runApp(
           streamedText = content;
           if (liveCardUpdates && content.trim()) {
             toolStatus = "";
-            updateCard(processingTitle(), buildCardContent(content));
+            const statsText = formatStats(latestStats);
+            updateCard(processingTitle(), buildCardContent(content, statsText ? `工具：${statsText}` : undefined));
           }
         },
         onToolUse: (toolName, stats) => {
+          latestStats = stats;
           const totalCalls = Object.values(stats).reduce((sum, count) => sum + (count || 0), 0);
+          const statsText = formatStats(stats);
           log.info(`tool=${toolName} total=${totalCalls}`);
-          // AI 卡片在工具调用/等待期显示实时调用次数，出字后清除。
-          if (!useAiCard || !liveCardUpdates) return;
+          // 处理中显示实时工具调用信息（AI 卡片与普通卡片都一样），出字后清除。
+          if (!liveCardUpdates) return;
           toolStatus = `[OMG] 正在调用工具（已 ${totalCalls} 次）…`;
-          updateCard(processingTitle(), buildCardContent(streamedText ? `${streamedText}\n\n${toolStatus}` : toolStatus));
+          updateCard(processingTitle(), buildCardContent(streamedText ? `${streamedText}\n\n${toolStatus}` : toolStatus, statsText ? `工具：${statsText}` : undefined));
         },
       });
       if (elapsedTimer) {

@@ -68,3 +68,39 @@ export async function sendRobotGroupText(
     throw new Error(`机器人 OpenAPI 发送失败：${result.errmsg || body.slice(0, 1_000)}`);
   }
 }
+
+/** Send a plain-text single-chat (person <-> robot) message through the DingTalk application robot OpenAPI. */
+export async function sendRobotSingleText(
+  userId: string,
+  content: string,
+  robotCode: string,
+  clientId: string,
+  clientSecret: string,
+): Promise<void> {
+  const token = await getAccessToken(clientId, clientSecret);
+  const response = await fetch("https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-acs-dingtalk-access-token": token,
+    },
+    body: JSON.stringify({
+      robotCode,
+      userIds: [userId],
+      msgKey: "sampleText",
+      msgParam: JSON.stringify({ content }),
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const body = await response.text();
+  if (!response.ok) throw new Error(`机器人单聊 OpenAPI 发送失败：${response.status} ${body.slice(0, 1_000)}`);
+  if (!body) return;
+  const result = JSON.parse(body) as { errcode?: number; errmsg?: string; invalidStaffIdList?: string[] };
+  if (typeof result.errcode === "number" && result.errcode !== 0) {
+    throw new Error(`机器人单聊 OpenAPI 发送失败：${result.errmsg || body.slice(0, 1_000)}`);
+  }
+  // 200 只代表请求被接受；userIds 无效时消息不会送达，必须当作失败以便回退。
+  if (Array.isArray(result.invalidStaffIdList) && result.invalidStaffIdList.length > 0) {
+    throw new Error(`机器人单聊 OpenAPI 未送达：${result.invalidStaffIdList.join(",")}`);
+  }
+}

@@ -3,6 +3,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { DWClient, TOPIC_ROBOT, type DWClientDownStream, type RobotMessage } from "dingtalk-stream";
 import type { Config } from "../core/config.js";
 import { createLogger } from "../core/logger.js";
+import { sendRobotSingleText } from "./dingtalk-robot.js";
 
 export interface DingTalkAttachment {
   type: "picture" | "audio" | "video" | "file";
@@ -20,6 +21,8 @@ export interface DownloadedAttachment extends DingTalkAttachment {
 
 export interface DingTalkTextMessage {
   callbackId: string;
+  /** 机器人回调里的 openMsgId，贴表情/撤回时使用。 */
+  msgId: string;
   conversationId: string;
   conversationType?: string;
   sessionWebhook: string;
@@ -78,6 +81,7 @@ export function parseDingTalkMessage(data: DWClientDownStream): DingTalkTextMess
   }
 
   const conversationId = payload.conversationId;
+  const msgId = payload.msgId;
   const sessionWebhook = payload.sessionWebhook;
   const senderStaffId = payload.senderStaffId;
   const senderId = payload.senderId;
@@ -101,6 +105,7 @@ export function parseDingTalkMessage(data: DWClientDownStream): DingTalkTextMess
 
   return {
     callbackId: data.headers.messageId,
+    msgId: typeof msgId === "string" ? msgId : "",
     conversationId,
     conversationType: typeof conversationType === "string" ? conversationType : undefined,
     sessionWebhook,
@@ -211,6 +216,8 @@ function sanitizeFileName(name: string): string {
 export class DingTalkBot {
   private client: DWClient | null = null;
   private readonly webhooks = new Map<string, string>();
+  // 单聊会话对应的用户 userId，用于走机器人单聊 OpenAPI 发送消息。
+  private readonly singleChatUsers = new Map<string, string>();
 
   constructor(private readonly config: Config) {}
 
@@ -257,9 +264,29 @@ export class DingTalkBot {
     this.client?.disconnect();
     this.client = null;
     this.webhooks.clear();
+    this.singleChatUsers.clear();
   }
 
   async sendText(conversationId: string, content: string): Promise<void> {
+    // 优先走机器人单聊 OpenAPI（不受 sessionWebhook 过期/丢失影响）；
+    // 拿不到 userId 或接口报错时再回退到 sessionWebhook。
+    const userId = this.singleChatUsers.get(conversationId);
+    if (userId && this.config.dingtalkClientId && this.config.dingtalkClientSecret) {
+      try {
+        await sendRobotSingleText(
+          userId,
+          content,
+          this.config.dingtalkClientId,
+          this.config.dingtalkClientId,
+          this.config.dingtalkClientSecret,
+        );
+        log.debug(`reply via robot OpenAPI conversation=${conversationId} userId=${userId} contentLen=${content.length}`);
+        return;
+      } catch (err) {
+        log.warn(`robot single-chat send failed, falling back to sessionWebhook: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     const webhook = this.webhooks.get(conversationId);
     if (!webhook) {
       log.warn(`No sessionWebhook for conversation=${conversationId}`);
@@ -398,6 +425,10 @@ export class DingTalkBot {
     if (!message) return null;
 
     this.webhooks.set(message.conversationId, message.sessionWebhook);
+    const singleUserId = message.senderStaffId?.trim();
+    if (singleUserId && isSingleConversation(message.conversationType)) {
+      this.singleChatUsers.set(message.conversationId, singleUserId);
+    }
     log.debug(
       `parsed conversation=${message.conversationId} sender=${message.senderStaffId ?? message.senderId} msgtype=${message.msgtype} textLen=${message.text.length} attachments=${message.attachments.length} webhookLen=${message.sessionWebhook.length}`,
     );
