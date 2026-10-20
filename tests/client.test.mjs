@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DingTalkAiCardClient } from "../dist/dingtalk/dingtalk-ai-card.js";
 import { DingTalkRobotEmotionClient, THINKING_EMOTION } from "../dist/dingtalk/robot-emotion.js";
-import { sendRobotSingleText } from "../dist/dingtalk/dingtalk-robot.js";
+import { robotMarkdownTitle, sendRobotSingleText } from "../dist/dingtalk/dingtalk-robot.js";
 import { normalizeAgentModel } from "../dist/dws-dashboard.js";
 
 function installFetch(handler) {
@@ -142,7 +142,7 @@ test("robot emotion surfaces business errors", async () => {
   }
 });
 
-test("sendRobotSingleText posts to the single-chat batchSend API", async () => {
+test("sendRobotSingleText posts markdown so 普通消息 renders formatting", async () => {
   const requests = [];
   const restore = installFetch(async (url, init) => {
     if (String(url).includes("/oauth2/accessToken")) return jsonResponse(200, { accessToken: "tok", expireIn: 7200 });
@@ -150,27 +150,58 @@ test("sendRobotSingleText posts to the single-chat batchSend API", async () => {
     return jsonResponse(200, { processQueryKey: "pq" });
   });
   try {
-    await sendRobotSingleText("user-1", "hello", "robot-code", "client-id", "client-secret");
+    await sendRobotSingleText("user-1", "## 结论\n\n**重点** 内容", "robot-code", "client-md-ok", "client-secret");
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend");
     assert.deepEqual(requests[0].body, {
       robotCode: "robot-code",
       userIds: ["user-1"],
-      msgKey: "sampleText",
-      msgParam: JSON.stringify({ content: "hello" }),
+      msgKey: "sampleMarkdown",
+      msgParam: JSON.stringify({ title: "结论", text: "## 结论\n\n**重点** 内容" }),
     });
   } finally {
     restore();
   }
 });
 
+test("a robot that rejects markdown falls back to plain text and stops retrying markdown", async () => {
+  const msgKeys = [];
+  const restore = installFetch(async (url, init) => {
+    if (String(url).includes("/oauth2/accessToken")) return jsonResponse(200, { accessToken: "tok", expireIn: 7200 });
+    const body = JSON.parse(init.body);
+    msgKeys.push(body.msgKey);
+    return body.msgKey === "sampleMarkdown"
+      ? jsonResponse(400, { code: "invalidMsgKey", message: "unsupported" })
+      : jsonResponse(200, { processQueryKey: "pq" });
+  });
+  try {
+    await sendRobotSingleText("user-1", "hello", "robot-code", "client-md-reject", "client-secret");
+    assert.deepEqual(msgKeys, ["sampleMarkdown", "sampleText"], "markdown first, then plain text");
+    msgKeys.length = 0;
+    await sendRobotSingleText("user-1", "hello again", "robot-code", "client-md-reject", "client-secret");
+    assert.deepEqual(msgKeys, ["sampleText"], "the rejection is remembered for this robot");
+  } finally {
+    restore();
+  }
+});
+
+test("robotMarkdownTitle keeps a short plain title from the first line", () => {
+  assert.equal(robotMarkdownTitle("## 结论\n\n正文"), "结论");
+  assert.equal(robotMarkdownTitle("**已处理** [文档](https://example.com)\n补充"), "已处理 文档");
+  assert.equal(robotMarkdownTitle(""), "回复");
+  assert.equal(robotMarkdownTitle("这是一个特别特别特别特别特别长的标题用来测试截断行为").length, 21);
+});
+
 test("sendRobotSingleText rejects when the userId is not delivered", async () => {
+  let sends = 0;
   const restore = installFetch(async (url) => {
     if (String(url).includes("/oauth2/accessToken")) return jsonResponse(200, { accessToken: "tok", expireIn: 7200 });
+    sends += 1;
     return jsonResponse(200, { processQueryKey: "pq", invalidStaffIdList: ["user-1"] });
   });
   try {
-    await assert.rejects(() => sendRobotSingleText("user-1", "hello", "robot-code", "client-id", "client-secret"), /未送达/);
+    await assert.rejects(() => sendRobotSingleText("user-1", "hello", "robot-code", "client-undelivered", "client-secret"), /未送达/);
+    assert.equal(sends, 1, "a delivery failure is not a format problem, so no plain-text retry");
   } finally {
     restore();
   }

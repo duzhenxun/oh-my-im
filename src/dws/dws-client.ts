@@ -1,5 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { BotMatch, GroupMatch, GroupMember, UserMatch } from "../dws-dashboard.js";
+import { createLogger } from "../core/logger.js";
+
+const log = createLogger("dws_client");
 
 export interface DwsMessageEvent {
   [key: string]: unknown;
@@ -83,16 +86,124 @@ export function runDwsJson<T>(args: string[]): Promise<T> {
   });
 }
 
-export async function searchRecentGroupMessages(sender: string, minutes = 10, limit = 20, range?: { start?: Date; end?: Date }): Promise<DwsMessageEvent[]> {
-  const end = range?.end ?? new Date();
-  const start = range?.start ?? new Date(end.getTime() - minutes * 60_000);
-  const result = await runDwsJson<DwsMessageListResponse & { data?: DwsMessageListResponse }>([
-    "chat", "+search-msg", "--sender", sender, "--chat-type", "group",
-    "--start", start.toISOString(), "--end", end.toISOString(),
-    "--order", "desc", "--limit", String(limit),
-  ]);
-  const messages = result.messages ?? result.result?.messages ?? result.data?.messages ?? result.data?.result?.messages ?? [];
-  return messages.map((message) => ({
+type DwsMessageListItem = NonNullable<DwsMessageListResponse["messages"]>[number];
+
+// dws >= v1.0.64 intermittently answers "+search-msg" with this api error
+// instead of an (often empty) collection. Measured on v1.0.64 it hits roughly a
+// third of all calls for the same query, with or without --start/--no-enrich, so
+// every attempt has to be retried and never trusted on its own.
+const UNDECIDABLE_COLLECTION_ERROR = "缺少明确的集合字段";
+
+/** Raised when dws keeps failing to describe the result of a message search. */
+export class DwsTransientSearchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DwsTransientSearchError";
+  }
+}
+
+function isUndecidableCollectionError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes(UNDECIDABLE_COLLECTION_ERROR);
+}
+
+// Once the precise window had to be abandoned, prefer the day-wide scan for a
+// while: an empty precise window is what dws fails to describe most often, and
+// both forms return the same messages after the local window filter.
+const WINDOW_SCAN_HOLD_MS = 30 * 60_000;
+let windowScanPreferredAt = 0;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+async function runWithUndecidableRetry<T>(attempts: number, run: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await run();
+    } catch (err) {
+      if (!isUndecidableCollectionError(err)) throw err;
+      lastError = err;
+      if (attempt < attempts) await sleep(100 * attempt);
+    }
+  }
+  throw lastError;
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** dws may print log lines around its JSON error envelope. */
+function parseErrorEnvelope(err: unknown): JsonRecord | undefined {
+  const text = err instanceof Error ? err.message : String(err);
+  for (let index = text.indexOf("{"); index >= 0; index = text.indexOf("{", index + 1)) {
+    try {
+      const parsed: unknown = JSON.parse(text.slice(index));
+      if (isRecord(parsed)) return parsed;
+    } catch {
+      // Not the envelope start; keep scanning.
+    }
+  }
+  return undefined;
+}
+
+const PARTIAL_RESULT_PATHS: string[][] = [
+  ["error", "details", "partialResult", "messages"],
+  ["details", "partialResult", "messages"],
+  ["error", "partialResult", "messages"],
+  ["partialResult", "messages"],
+];
+
+/**
+ * dws answers an incomplete search with `reason: search_messages_incomplete`,
+ * `retryable: true` and a `details.partialResult` that already holds the hits,
+ * plus `failures[]` naming the stage that broke (usually message-enrichment).
+ * The contract is to keep the partial hits and only redo the failed stage, so
+ * the page is used as-is: this pipeline needs no enrichment.
+ */
+function partialResultMessages(err: unknown): DwsMessageListItem[] | undefined {
+  const envelope = parseErrorEnvelope(err);
+  if (!envelope) return undefined;
+  for (const path of PARTIAL_RESULT_PATHS) {
+    let node: unknown = envelope;
+    for (const key of path) {
+      node = isRecord(node) ? node[key] : undefined;
+    }
+    if (Array.isArray(node) && node.length) return node as DwsMessageListItem[];
+  }
+  return undefined;
+}
+
+/** Stage names from `details.failures[]`, for logging what dws could not finish. */
+function failedStages(err: unknown): string {
+  const envelope = parseErrorEnvelope(err);
+  const details = isRecord(envelope?.error) ? envelope.error.details : envelope?.details;
+  const failures = isRecord(details) ? details.failures : undefined;
+  if (!Array.isArray(failures)) return "";
+  const stages = failures
+    .map((item) => (isRecord(item) ? item.stage : undefined))
+    .filter((stage): stage is string => typeof stage === "string" && Boolean(stage));
+  return [...new Set(stages)].join(",");
+}
+
+function listMessages(result: DwsMessageListResponse & { data?: DwsMessageListResponse }): DwsMessageListItem[] {
+  return result.messages ?? result.result?.messages ?? result.data?.messages ?? result.data?.result?.messages ?? [];
+}
+
+/** dws formats message timestamps as local "YYYY-MM-DD HH:mm:ss" without an offset. */
+function localTimeMs(value?: string): number | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  const parsed = Date.parse(trimmed.includes("T") ? trimmed : trimmed.replace(" ", "T"));
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function toDwsMessageEvent(message: DwsMessageListItem): DwsMessageEvent {
+  return {
     conversation_id: message.conversationId || message.openConversationId,
     create_time: message.createTime,
     message_id: message.messageId || message.openMessageId,
@@ -102,7 +213,66 @@ export async function searchRecentGroupMessages(sender: string, minutes = 10, li
     atUsers: message.atUsers, atUserIds: message.atUserIds, atOpenDingTalkIds: message.atOpenDingTalkIds,
     at_users: message.at_users, at_user_ids: message.at_user_ids, at_open_dingtalk_ids: message.at_open_dingtalk_ids,
     mentions: message.mentions,
-  }));
+  };
+}
+
+export async function searchRecentGroupMessages(sender: string, minutes = 10, limit = 20, range?: { start?: Date; end?: Date }): Promise<DwsMessageEvent[]> {
+  const end = range?.end ?? new Date();
+  const start = range?.start ?? new Date(end.getTime() - minutes * 60_000);
+  // --no-enrich keeps reaction/thread detail lookups out of the call: the poll
+  // only needs sender, text, time and ids, and enrichment is what makes dws
+  // abort a whole page with "business error: success=false".
+  const query = async (args: string[]): Promise<DwsMessageListResponse & { data?: DwsMessageListResponse }> => {
+    try {
+      return await runDwsJson<DwsMessageListResponse & { data?: DwsMessageListResponse }>([
+        "chat", "+search-msg", "--sender", sender, "--chat-type", "group", "--no-enrich", ...args,
+      ]);
+    } catch (err) {
+      const salvaged = partialResultMessages(err);
+      if (!salvaged) throw err;
+      const stages = failedStages(err);
+      log.debug(`+search-msg returned a partial page (${salvaged.length} messages)`
+        + (stages ? `; failed stage=${stages}` : "") + "; keeping the hits, no retry");
+      return { messages: salvaged };
+    }
+  };
+  const preferWindowScan = Date.now() - windowScanPreferredAt < WINDOW_SCAN_HOLD_MS;
+  if (!preferWindowScan) {
+    try {
+      const result = await runWithUndecidableRetry(2, () => query([
+        "--start", start.toISOString(), "--end", end.toISOString(),
+        "--order", "desc", "--limit", String(limit),
+      ]));
+      return listMessages(result).map(toDwsMessageEvent);
+    } catch (err) {
+      if (!isUndecidableCollectionError(err)) throw err;
+    }
+  }
+  // The precise window stayed undecidable: scan whole days up to `end` instead
+  // and keep only messages inside [start, end] locally. This also covers dws
+  // reporting an *empty* precise window as undecidable. Messages without a
+  // parseable timestamp are dropped rather than replayed as fresh events.
+  const days = Math.min(3650, Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 86_400_000)));
+  const windowLimit = Math.min(100, Math.max(limit, limit * 5));
+  try {
+    const result = await runWithUndecidableRetry(4, () => query([
+      "--days", String(days), "--end", end.toISOString(),
+      "--order", "desc", "--limit", String(windowLimit),
+    ]));
+    windowScanPreferredAt = Date.now();
+    log.debug(`+search-msg fell back to a ${days}d window for ${start.toISOString()}..${end.toISOString()}`);
+    return listMessages(result)
+      .filter((message) => {
+        const at = localTimeMs(message.createTime);
+        return at !== undefined && at >= start.getTime() && at <= end.getTime() + 1_000;
+      })
+      .map(toDwsMessageEvent);
+  } catch (err) {
+    if (!isUndecidableCollectionError(err)) throw err;
+    throw new DwsTransientSearchError(
+      `dws +search-msg kept answering "${UNDECIDABLE_COLLECTION_ERROR}" for ${start.toISOString()}..${end.toISOString()}`,
+    );
+  }
 }
 
 /* Kept only for callers outside the history pipeline; normal operation uses +search-msg. */

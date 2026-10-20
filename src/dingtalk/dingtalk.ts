@@ -3,7 +3,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { DWClient, TOPIC_ROBOT, type DWClientDownStream, type RobotMessage } from "dingtalk-stream";
 import type { Config } from "../core/config.js";
 import { createLogger } from "../core/logger.js";
-import { sendRobotSingleText } from "./dingtalk-robot.js";
+import { robotMarkdownTitle, sendRobotSingleText } from "./dingtalk-robot.js";
 
 export interface DingTalkAttachment {
   type: "picture" | "audio" | "video" | "file";
@@ -295,18 +295,25 @@ export class DingTalkBot {
 
     const accessToken = await this.getAccessToken();
     log.debug(`replying conversation=${conversationId} contentLen=${content.length}`);
-    const res = await fetch(webhook, {
+    const post = (payload: Record<string, unknown>) => fetch(webhook, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "x-acs-dingtalk-access-token": accessToken,
       },
-      body: JSON.stringify({
-        msgtype: "text",
-        text: { content },
-      }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(30_000),
     });
+
+    // 「普通消息」按 Markdown 发送，Webhook 被拒绝时降级为纯文本。
+    let res = await post({ msgtype: "markdown", markdown: { title: robotMarkdownTitle(content), text: content } });
+    if (!res.ok) {
+      const rejected = await res.text();
+      log.warn(
+        `markdown reply rejected conversation=${conversationId} status=${res.status} body=${safePreview(rejected)}；改用纯文本重发`,
+      );
+      res = await post({ msgtype: "text", text: { content } });
+    }
 
     if (!res.ok) {
       const text = await res.text();
